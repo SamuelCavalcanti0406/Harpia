@@ -1,0 +1,2 @@
+# HarpIA
+Uma LLM brasileira
