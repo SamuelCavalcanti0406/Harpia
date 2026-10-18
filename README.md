@@ -14,6 +14,7 @@ A HarpIA é uma assistente de inteligência artificial executada localmente com 
 - Busca em documentos locais para complementar as respostas.
 - Conversas privadas por usuário e API protegida por credencial.
 - Pesquisa opcional na web com links das fontes consultadas.
+- Análise local de bases econômicas CSV e Excel com Pandas e NumPy.
 
 ## Começar no Windows
 
@@ -22,6 +23,10 @@ Pré-requisitos: Python 3.11 ou posterior e [Ollama](https://ollama.com/download
 1. Abra `Iniciar-HarpIA.bat` com dois cliques.
 2. Na primeira execução, aguarde a preparação do ambiente e do modelo; o download inicial pode demorar.
 3. Faça uma pergunta no chat que será aberto no terminal.
+
+Para analisar dados de um estabelecimento, envie uma planilha CSV ou XLSX pelo comando `/importar "C:\\caminho\\da\\base.xlsx"`. Depois, pergunte sobre faturamento, custos, despesas, lucro ou tendências. Use `/bases` para ver os arquivos recebidos.
+
+As bases ficam no computador, separadas por usuário, e não são incluídas no Git. A HarpIA envia somente resumos numéricos ao modelo local para explicar os resultados.
 
 Para ativar a pesquisa na web, copie `backend/.env.example` para `backend/.env` e configure sua chave Tavily. Mantenha essa chave apenas no arquivo `.env`, que não é enviado ao Git.
 

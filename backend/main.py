@@ -7,7 +7,7 @@ from pathlib import Path
 import time
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 from ollama import Client, ResponseError
@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 from auth import usuario_atual
 from context import montar_contexto, NUM_CTX, RESPONSE_TOKENS, INPUT_BUDGET
+from economic_analysis import EconomicDataError, documentos_analise, listar_bases, salvar_upload
 from knowledge import pesquisar, assunto_anterior
 from storage import get_conn, init_db
 from web_search import pesquisar_web, precisa_pesquisa
@@ -66,6 +67,19 @@ def listar_conversas(usuario: str=Depends(usuario_atual),limite: int=Query(50,ge
         return [dict(r) for r in conn.execute(
             'SELECT id,titulo,criada_em,atualizada_em FROM conversas WHERE owner_id=? ORDER BY atualizada_em DESC LIMIT ? OFFSET ?',
             (usuario,limite,offset))]
+
+@app.post('/dados')
+def importar_dados(arquivo: UploadFile=File(...),usuario: str=Depends(usuario_atual)):
+    try:
+        return salvar_upload(usuario,arquivo.filename,arquivo.file)
+    except EconomicDataError as exc:
+        raise HTTPException(400,str(exc)) from exc
+    finally:
+        arquivo.file.close()
+
+@app.get('/dados')
+def listar_dados(usuario: str=Depends(usuario_atual)):
+    return listar_bases(usuario)
 
 @app.get('/conversas/{conversa_id}')
 def obter_conversa(conversa_id: str,usuario: str=Depends(usuario_atual)):
@@ -162,7 +176,9 @@ def conversar(entrada: EntradaChat,usuario: str=Depends(usuario_atual)):
                 else:
                     text=gerar(messages)
         else:
-            docs=pesquisar(entrada.mensagem,limite=3,anterior=previous)
+            docs=documentos_analise(usuario,entrada.mensagem)
+            if not docs:
+                docs=pesquisar(entrada.mensagem,limite=3,anterior=previous)
             messages,sources,usage=montar_contexto(entrada.mensagem,rows,docs,
                                                    incluir_diagnostico=True,
                                                    historico_total=history_total)

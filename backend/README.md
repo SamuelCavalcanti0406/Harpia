@@ -1,6 +1,20 @@
 # HarpIA
 
-Assistente local em português com Ollama, busca documental e conversas privadas por usuário.
+Assistente local em português com Ollama, busca documental, análises econômicas locais e conversas privadas por usuário.
+
+## Análise econômica de planilhas locais
+
+No chat local, use `/importar "C:\\caminho\\da\\base.xlsx"` para enviar uma base CSV ou XLSX. CSV deve ter cabeçalhos na primeira linha; em Excel, a HarpIA lê a primeira aba. O limite é 25 MB, 200 mil linhas e 100 colunas. `/bases` lista os arquivos daquele usuário; a base enviada mais recentemente é usada nas análises.
+
+Exemplos de perguntas:
+
+- `Analise o faturamento, os custos e o lucro desta base.`
+- `Como as vendas variaram por mês?`
+- `Quais indicadores têm maior correlação?`
+
+A análise usa Pandas e NumPy para calcular estatísticas descritivas, somas para colunas financeiras reconhecidas, variação mensal quando há uma coluna de data e correlações entre colunas numéricas. Os nomes de coluna são inferidos; use títulos claros, como `data`, `estabelecimento`, `receita`, `custo`, `despesa` e `lucro`. A HarpIA não presume moeda ou unidade. Correlação não demonstra causalidade.
+
+Os arquivos são guardados localmente em `.local/economic_data/`, em uma pasta derivada da identidade autenticada de cada usuário. O `.local/` já é ignorado pelo Git. O arquivo integral não é enviado ao modelo: somente o resumo calculado é incluído no contexto do Ollama local.
 
 ## Abertura automática no Windows
 

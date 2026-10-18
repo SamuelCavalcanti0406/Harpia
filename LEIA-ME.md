@@ -14,6 +14,8 @@ Experimente no chat:
 - `Qual é a cotação atual do dólar?` — deve consultar a web e mostrar as fontes.
 - `Quais são as principais notícias de hoje no Brasil?` — pesquisa notícias recentes.
 
+Para analisar os dados de um estabelecimento, envie uma planilha CSV ou Excel no chat com `/importar "C:\\caminho\\da\\base.xlsx"`. Depois pergunte sobre faturamento, custos, despesas, lucro ou tendências. Use `/bases` para ver os arquivos enviados. As bases ficam localmente em `.local` e são separadas por usuário.
+
 Confirme a pesquisa procurando `Fontes consultadas` e os links no fim da resposta. A documentação Swagger em `/docs` permanece desativada; a API exige credencial, e o chat local já usa essa autenticação com segurança.
 
 - `/nova`: começa outra conversa.

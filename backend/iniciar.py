@@ -198,7 +198,7 @@ def conversar_terminal(client):
     cid = None
     pending = None
     print('\nHarpIA pronta. Digite sua pergunta e pressione Enter.')
-    print('Comandos: /nova, /conversas, /abrir ID, /repetir, /sair\n')
+    print('Comandos: /importar CAMINHO, /bases, /nova, /conversas, /abrir ID, /repetir, /sair\n')
     while True:
         try:
             question = input('Voce: ').strip()
@@ -219,6 +219,34 @@ def conversar_terminal(client):
                     print(row['id'], '-', row['titulo'])
                 if not response.json(): print('Nenhuma conversa neste usuario.')
                 continue
+            if question == '/bases':
+                response = client.get('/dados')
+                response.raise_for_status()
+                bases = response.json()
+                for base in bases:
+                    ativa = ' (base usada nas analises)' if base.get('ativa') else ''
+                    print(base['id'], '-', base['nome'], ativa)
+                if not bases: print('Nenhuma base economica enviada neste usuario.')
+                continue
+            if question.startswith('/importar '):
+                raw_path = question[len('/importar '):].strip()
+                if len(raw_path) >= 2 and raw_path[0] == raw_path[-1] and raw_path[0] in ('"', "'"):
+                    raw_path = raw_path[1:-1]
+                source = Path(raw_path).expanduser()
+                if not source.is_file():
+                    print('Arquivo nao encontrado. Informe o caminho entre aspas se houver espacos.'); continue
+                if source.suffix.lower() not in {'.csv', '.xlsx'}:
+                    print('Formato nao aceito. Use um arquivo CSV ou XLSX.'); continue
+                with source.open('rb') as handle:
+                    response = client.post('/dados', files={'arquivo': (source.name, handle, 'application/octet-stream')})
+                if not response.is_success:
+                    try: detail = response.json().get('detail', 'Falha ao importar a base.')
+                    except ValueError: detail = 'Falha ao importar a base.'
+                    print('Nao foi possivel importar:', detail); continue
+                data = response.json()
+                print(f"Base recebida: {data['nome']} ({data['linhas']} linhas, {len(data['colunas'])} colunas).")
+                print('A base mais recente deste usuario sera usada nas analises. Os arquivos ficam neste computador.')
+                continue
             if question.startswith('/abrir '):
                 selected = question.split(maxsplit=1)[1]
                 response = client.get('/conversas/' + selected)
@@ -237,7 +265,7 @@ def conversar_terminal(client):
                 if pending is None:
                     print('Nenhuma tentativa para repetir.'); continue
             elif question.startswith('/'):
-                print('Comando desconhecido. Use /nova, /conversas, /abrir ID, /repetir ou /sair.'); continue
+                print('Comando desconhecido. Use /importar CAMINHO, /bases, /nova, /conversas, /abrir ID, /repetir ou /sair.'); continue
             else:
                 pending = {'mensagem': question, 'requisicao_id': str(uuid.uuid4())}
                 if cid: pending['conversa_id'] = cid

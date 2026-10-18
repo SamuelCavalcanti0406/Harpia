@@ -21,7 +21,7 @@ try {
     }
     & $pythonHarpia -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)'
     if ($LASTEXITCODE -ne 0) { throw 'O ambiente precisa de Python 3.11 ou posterior.' }
-    & $pythonHarpia -c 'import fastapi, uvicorn, ollama, httpx, pydantic'
+    & $pythonHarpia -c 'import fastapi, uvicorn, ollama, httpx, pydantic, numpy, pandas, openpyxl, multipart'
     if ($LASTEXITCODE -ne 0) {
         if ($Verificar) { throw 'Dependencias ausentes. Execute Iniciar-HarpIA.bat para instalar.' }
         Write-Host 'Instalando as dependencias da HarpIA...'
