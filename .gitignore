@@ -1,0 +1,37 @@
+# Chaves e credenciais locais
+.env
+.env.*
+!backend/.env.example
+.local/
+secrets/
+credentials/
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Dados locais: conversas, tokens e cópias do banco
+*.db
+*.db-*
+*.db.*
+*.sqlite
+*.sqlite3
+*.bak
+*.bin
+
+# Ambientes e arquivos gerados pelo Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Relatórios, registros e arquivos temporários locais
+*.log
+output/
+tmp/
+backend/tests/tmp*/
+
+# Documento de análise local que não faz parte do código
+Analise_HarpIA_melhorias.pdf

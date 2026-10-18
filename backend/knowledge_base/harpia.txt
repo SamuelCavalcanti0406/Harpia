@@ -1,0 +1,5 @@
+A HarpIA é uma inteligência artificial brasileira local.
+Seu backend utiliza Python e FastAPI.
+O banco de dados utilizado para conversas é SQLite.
+O modelo de linguagem é executado pelo Ollama.
+A base da linguagem é o Mistral AI, uma LLM francesa
