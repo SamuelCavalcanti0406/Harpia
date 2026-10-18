@@ -32,7 +32,8 @@ async def lifespan(app):
     init_db()
     yield
 
-app=FastAPI(title='HarpIA',version='0.2.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
+app=FastAPI(title='HarpIA',version='0.2
+            .0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
 origins=[x.strip() for x in os.getenv('HARPIA_CORS_ORIGINS','').split(',') if x.strip()]
 if '*' in origins:
     raise ValueError('Configure origens explícitas em HARPIA_CORS_ORIGINS, não *.')
