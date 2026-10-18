@@ -23,7 +23,8 @@ def precisa_pesquisa(pergunta):
         'noticias sobre', 'noticias hoje', 'ontem', 'esta semana', 'este mes',
         'recentemente', 'mais recente', 'cotacao', 'preco atual', 'precos atuais',
         'quanto custa', 'taxa selic', 'dolar hoje', 'euro hoje', 'previsao do tempo',
-        'como esta o tempo', 'quem e o presidente', 'presidente atual', 'quem ganhou',
+        'como esta o tempo', 'quem e ', 'quem foi ', 'quem era ', 'biografia de ',
+        'presidente atual', 'quem ganhou',
         'resultado de hoje', 'pesquise', 'pesquisar na internet', 'pesquisa na internet',
         'busque na internet', 'procure na internet', 'pesquise na web',
     )
