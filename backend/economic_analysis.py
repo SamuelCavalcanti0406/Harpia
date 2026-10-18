@@ -1,4 +1,3 @@
-"""Per-user local tabular uploads and deterministic economic summaries."""
 from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
@@ -21,7 +20,7 @@ ANALYSIS_WORDS = re.compile(
     r'custos?|lucros?|margens?|vend\w*|estoques?|pedidos?|quantidades?|'
     r'crescimentos?|tendencias?|medias?|medianas?|compar\w*|caixa|'
     r'rentabilidades?|ticket|financeir\w*|produtos?|estabelecimentos?|'
-    r'balancos?|fluxos?|resultados?|precos?|gastos?|pagamentos?)\b', re.I)
+    r'balancos?|fluxos?|resultados?|precos?|gastos?|pagamentos?|fluxo?|caixa?)\b', re.I)
 REQUESTS_DATA = re.compile(
     r'\b(analis\w*|calcule|mostre|resuma|compar\w*|quanto|total|'
     r'dados?|base|planilha|arquivo|meus|minhas|minha|meu|variou|evoluiu)\b', re.I)
