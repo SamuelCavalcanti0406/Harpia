@@ -6,7 +6,7 @@
 
 ## Sobre
 
-A HarpIA é uma assistente de inteligência artificial executada localmente com [Ollama](https://ollama.com/) e o modelo Mistral. Ela combina conversa, busca em uma base de conhecimento e, opcionalmente, pesquisa na web para perguntas sobre informações atuais.
+A HarpIA é uma assistente de inteligência artificial executada localmente com [Ollama](https://ollama.com/) e o modelo [Mistral](https://mistral.ai/). Ela combina conversa, busca em uma base de conhecimento e, opcionalmente, pesquisa na web para perguntas sobre informações atuais.
 
 ## Recursos
 
