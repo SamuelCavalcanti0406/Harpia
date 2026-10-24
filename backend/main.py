@@ -9,6 +9,7 @@ import uuid
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 import httpx
 from ollama import Client, ResponseError
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +17,15 @@ from dotenv import load_dotenv
 
 from auth import usuario_atual
 from context import montar_contexto, NUM_CTX, RESPONSE_TOKENS, INPUT_BUDGET
+from document_processing import (
+    DocumentProcessingError,
+    DoclingUnavailableError,
+    documentos_contexto,
+    exportar_tabela_csv,
+    importar_documento,
+    listar_documentos,
+    registrar_upload,
+)
 from economic_analysis import EconomicDataError, documentos_analise, listar_bases, salvar_upload
 from knowledge import pesquisar, assunto_anterior
 from storage import get_conn, init_db
@@ -32,8 +42,7 @@ async def lifespan(app):
     init_db()
     yield
 
-app=FastAPI(title='HarpIA',version='0.2
-            .0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
+app=FastAPI(title='HarpIA',version='0.2.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
 origins=[x.strip() for x in os.getenv('HARPIA_CORS_ORIGINS','').split(',') if x.strip()]
 if '*' in origins:
     raise ValueError('Configure origens explícitas em HARPIA_CORS_ORIGINS, não *.')
@@ -81,6 +90,37 @@ def importar_dados(arquivo: UploadFile=File(...),usuario: str=Depends(usuario_at
 @app.get('/dados')
 def listar_dados(usuario: str=Depends(usuario_atual)):
     return listar_bases(usuario)
+
+@app.post('/documentos')
+def receber_documento(arquivo: UploadFile=File(...),usuario: str=Depends(usuario_atual)):
+    """Guarda o original; a importação para conhecimento é uma ação explícita."""
+    try:
+        return registrar_upload(usuario,arquivo.filename,arquivo.file)
+    except DocumentProcessingError as exc:
+        raise HTTPException(400,str(exc)) from exc
+    finally:
+        arquivo.file.close()
+
+@app.get('/documentos')
+def listar_documentos_api(usuario: str=Depends(usuario_atual)):
+    return listar_documentos(usuario)
+
+@app.post('/documentos/{documento_id}/importar')
+def importar_documento_api(documento_id: str,usuario: str=Depends(usuario_atual)):
+    try:
+        return importar_documento(usuario,documento_id)
+    except DoclingUnavailableError as exc:
+        raise HTTPException(503,str(exc)) from exc
+    except DocumentProcessingError as exc:
+        raise HTTPException(400,str(exc)) from exc
+
+@app.get('/documentos/{documento_id}/tabelas/{numero}/csv')
+def exportar_tabela_api(documento_id: str,numero: int,usuario: str=Depends(usuario_atual)):
+    try:
+        content,filename=exportar_tabela_csv(usuario,documento_id,numero)
+    except DocumentProcessingError as exc:
+        raise HTTPException(404,str(exc)) from exc
+    return Response(content=content,media_type='text/csv',headers={'Content-Disposition':f'attachment; filename="{filename}"'})
 
 @app.get('/conversas/{conversa_id}')
 def obter_conversa(conversa_id: str,usuario: str=Depends(usuario_atual)):
@@ -178,6 +218,8 @@ def conversar(entrada: EntradaChat,usuario: str=Depends(usuario_atual)):
                     text=gerar(messages)
         else:
             docs=documentos_analise(usuario,entrada.mensagem)
+            if not docs:
+                docs=documentos_contexto(usuario,entrada.mensagem,limite=3)
             if not docs:
                 docs=pesquisar(entrada.mensagem,limite=3,anterior=previous)
             messages,sources,usage=montar_contexto(entrada.mensagem,rows,docs,

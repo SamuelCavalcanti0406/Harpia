@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
+import json
 import math
 import re
 import uuid
@@ -203,79 +204,251 @@ def _relevante(nome):
     return bool(ANALYSIS_WORDS.search(_normalizar(nome)))
 
 
-def _relatorio(frame, filename):
+def _valor_json(value):
+    if pd.isna(value):
+        return None
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    if hasattr(value, 'isoformat'):
+        return value.isoformat()
+    return value
+
+
+def percentual_variacao(valor_inicial, valor_final):
+    """Aplica ((final - inicial) / inicial) * 100 sem inventar divisão por zero."""
+    try:
+        inicial = float(valor_inicial)
+        final = float(valor_final)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(inicial) or not np.isfinite(final) or inicial == 0:
+        return None
+    return ((final - inicial) / inicial) * 100
+
+
+def inspecionar_dados(frame, amostra=5):
+    """Retorna um diagnóstico serializável antes de qualquer indicador."""
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        raise EconomicDataError('A base está vazia.')
     df = frame.copy()
+    original_columns = list(df.columns)
     numeric = _colunas_numericas(df)
     date_name, dates = _data_column(df)
-    sections = [f'Base: {filename}. Linhas: {len(df)}. Colunas: {len(df.columns)}.']
-    if date_name:
-        valid_dates = dates.dropna()
-        if not valid_dates.empty:
-            sections.append(f'Período da coluna {date_name}: {valid_dates.min():%Y-%m-%d} a {valid_dates.max():%Y-%m-%d}.')
-    sections.append('Colunas: ' + ', '.join(str(c)[:50] for c in df.columns[:25]) + '.')
-    missing = [(str(c), int(df[c].isna().sum())) for c in df.columns if df[c].isna().any()]
-    if missing:
-        sections.append('Valores ausentes: ' + '; '.join(f'{c}: {n}' for c, n in missing[:8]) + '.')
+    details = []
+    format_issues = []
+    categorical = []
+    for column in original_columns:
+        series = df[column]
+        inferred = 'numérica' if column in numeric else 'data' if column == date_name else 'texto'
+        if inferred == 'texto' and series.nunique(dropna=True) <= min(50, max(5, len(df) // 2)):
+            categorical.append(str(column))
+        non_null = int(frame[column].notna().sum())
+        converted = frame[column].map(_parse_number) if inferred == 'texto' else pd.Series(dtype=float)
+        if inferred == 'texto' and non_null and 0 < int(converted.notna().sum()) < math.ceil(non_null * 0.8):
+            format_issues.append({
+                'coluna': str(column),
+                'problema': 'valores misturam números e formatos não reconhecidos',
+            })
+        details.append({
+            'nome': str(column),
+            'tipo_original': str(frame[column].dtype),
+            'tipo_inferido': inferred,
+            'ausentes': int(frame[column].isna().sum()),
+            'unicos': int(frame[column].nunique(dropna=True)),
+        })
+    return {
+        'linhas': int(len(frame)),
+        'colunas': int(len(frame.columns)),
+        'colunas_detalhes': details,
+        'colunas_numericas': [str(column) for column in numeric],
+        'coluna_data': str(date_name) if date_name else None,
+        'colunas_categoricas': categorical,
+        'valores_ausentes': {str(column): int(frame[column].isna().sum())
+                             for column in frame.columns if frame[column].isna().any()},
+        'duplicatas': int(frame.duplicated().sum()),
+        'possiveis_erros_formatacao': format_issues,
+        'amostra': [{str(key): _valor_json(value) for key, value in row.items()}
+                    for row in frame.head(max(0, int(amostra))).to_dict(orient='records')],
+        'periodo': ({'inicio': dates.dropna().min().date().isoformat(),
+                     'fim': dates.dropna().max().date().isoformat()}
+                    if date_name and dates is not None and not dates.dropna().empty else None),
+    }
 
-    measures = []
-    for column in numeric[:8]:
+
+def estatistica_descritiva(frame, colunas=None):
+    df = frame.copy()
+    numeric = _colunas_numericas(df)
+    if colunas is not None:
+        requested = {str(column) for column in colunas}
+        numeric = [column for column in numeric if str(column) in requested]
+    result = {}
+    for column in numeric:
         values = pd.to_numeric(df[column], errors='coerce').replace([np.inf, -np.inf], np.nan).dropna()
         if values.empty:
             continue
-        line = (f'{column}: média {values.mean():.2f}; mediana {values.median():.2f}; '
-                f'mínimo {values.min():.2f}; máximo {values.max():.2f}')
-        if _relevante(column) or _normalizar(column) in {'valor', 'total'}:
-            line += f'; soma {values.sum():.2f}'
-        measures.append(line + '.')
-    if measures:
-        sections.append('Resumo numérico (unidades conforme o arquivo): ' + ' '.join(measures))
+        result[str(column)] = {
+            'contagem': int(values.count()),
+            'soma': float(values.sum()),
+            'media': float(values.mean()),
+            'mediana': float(values.median()),
+            'minimo': float(values.min()),
+            'maximo': float(values.max()),
+            'desvio_padrao': float(values.std(ddof=1)) if len(values) > 1 else None,
+            'variancia': float(values.var(ddof=1)) if len(values) > 1 else None,
+            'quartis': {str(key): float(value) for key, value in values.quantile([.25, .5, .75]).items()},
+        }
+    return result
 
-    amount_columns = [c for c in numeric if _relevante(c) and any(
-        term in _normalizar(c) for term in ('receita', 'faturamento', 'venda', 'despesa', 'custo', 'lucro', 'gasto'))]
-    if date_name and amount_columns:
-        series = df[amount_columns[:4]].copy()
-        series['_periodo'] = dates.dt.to_period('M')
-        monthly = series.dropna(subset=['_periodo']).groupby('_periodo', observed=True)[amount_columns[:4]].sum().sort_index()
-        if len(monthly):
-            rows = []
-            for period, row in monthly.tail(12).iterrows():
-                values = ', '.join(f'{c} {row[c]:.2f}' for c in amount_columns[:4])
-                rows.append(f'{period}: {values}')
-            sections.append('Somas mensais dos indicadores selecionados (até os 12 meses mais recentes): ' + '; '.join(rows) + '.')
-            for column in amount_columns[:4]:
-                values = monthly[column].dropna()
-                if len(values) >= 2 and float(values.iloc[0]) != 0:
-                    change = (float(values.iloc[-1]) - float(values.iloc[0])) / abs(float(values.iloc[0])) * 100
-                    sections.append(f'Variação de {column} entre os meses disponíveis: {change:.2f}% (de {values.index[0]} a {values.index[-1]}).')
 
-    group_terms = ('estabelecimento', 'loja', 'filial', 'unidade', 'produto',
-                   'categoria', 'canal', 'segmento', 'regiao')
-    group_columns = [c for c in df.columns
-                     if any(term in _normalizar(c) for term in group_terms)
-                     and 1 < int(df[c].nunique(dropna=True)) <= 50]
-    if amount_columns:
-        rankings = []
-        for group_column in group_columns[:3]:
-            for amount_column in amount_columns[:2]:
-                grouped = df.groupby(group_column, dropna=True)[amount_column].sum()
-                if len(grouped) > 1:
-                    top = grouped.sort_values(ascending=False).head(5)
-                    entries = ', '.join(f'{str(label)[:50]}: {value:.2f}' for label, value in top.items())
-                    rankings.append(f'{amount_column} por {group_column} (maiores): {entries}')
-        if rankings:
-            sections.append('Comparações por grupo: ' + '; '.join(rankings[:4]) + '.')
+def distribuicao_categorias(frame, limite=20):
+    result = {}
+    for column in frame.columns:
+        series = frame[column]
+        if pd.api.types.is_numeric_dtype(series) or series.nunique(dropna=True) > 50:
+            continue
+        counts = series.fillna('ausente').value_counts(dropna=False).head(limite)
+        result[str(column)] = {str(key): int(value) for key, value in counts.items()}
+    return result
 
+
+def comparar_periodos(frame, coluna_data=None, coluna_valor=None, frequencia='M', agregacao='sum'):
+    """Compara períodos agregados e expõe valores, fórmula e limitações."""
+    df = frame.copy()
+    if coluna_data is None:
+        coluna_data, datas = _data_column(df)
+    else:
+        datas = pd.to_datetime(df[coluna_data], errors='coerce', dayfirst=True)
+    if not coluna_data or coluna_valor not in df.columns:
+        return {'disponivel': False, 'motivo': 'É necessária uma coluna de data e uma coluna numérica.'}
+    values = pd.to_numeric(df[coluna_valor].map(_parse_number), errors='coerce')
+    valid = pd.DataFrame({'periodo': datas.dt.to_period(frequencia), 'valor': values}).dropna()
+    if valid.empty:
+        return {'disponivel': False, 'motivo': 'Não há datas e valores válidos para comparar.'}
+    grouped = valid.groupby('periodo', observed=True)['valor']
+    if agregacao == 'mean':
+        series = grouped.mean().sort_index()
+    else:
+        series = grouped.sum().sort_index()
+    periods = []
+    previous = None
+    for period, value in series.items():
+        current = float(value)
+        periods.append({
+            'periodo': str(period),
+            'valor': current,
+            'variacao_absoluta': None if previous is None else current - previous,
+            'variacao_percentual': None if previous is None else percentual_variacao(previous, current),
+        })
+        previous = current
+    return {
+        'disponivel': True,
+        'coluna_data': str(coluna_data),
+        'coluna_valor': str(coluna_valor),
+        'agregacao': agregacao,
+        'periodos': periods,
+        'formula_variacao_percentual': '((valor_final - valor_inicial) / valor_inicial) * 100; nula quando o inicial é zero ou inválido.',
+    }
+
+
+def identificar_atipicos(frame, coluna):
+    if coluna not in frame.columns:
+        return {'disponivel': False, 'motivo': 'Coluna não encontrada.'}
+    values = pd.to_numeric(frame[coluna].map(_parse_number), errors='coerce').dropna()
+    if len(values) < 4:
+        return {'disponivel': False, 'motivo': 'São necessários pelo menos quatro valores válidos.'}
+    q1, q3 = values.quantile(.25), values.quantile(.75)
+    iqr = q3 - q1
+    lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+    return {
+        'disponivel': True,
+        'coluna': str(coluna),
+        'metodo': 'IQR: abaixo de Q1 - 1,5*IQR ou acima de Q3 + 1,5*IQR',
+        'limite_inferior': float(lower),
+        'limite_superior': float(upper),
+        'indices': [int(index) for index, value in values.items() if value < lower or value > upper],
+    }
+
+
+def calcular_indicadores(frame):
+    df = frame.copy()
+    numeric = _colunas_numericas(df)
+    date_name, _ = _data_column(df)
+    indicators = {'formula_variacao_percentual': '((valor_final - valor_inicial) / valor_inicial) * 100'}
+    if date_name and numeric:
+        indicators['evolucao'] = comparar_periodos(df, date_name, numeric[0])
+    revenue = next((column for column in numeric if any(term in _normalizar(column)
+                    for term in ('receita', 'faturamento', 'venda'))), None)
+    profit = next((column for column in numeric if any(term in _normalizar(column)
+                   for term in ('lucro', 'resultado'))), None)
+    if revenue and profit:
+        valid = pd.DataFrame({'receita': df[revenue].map(_parse_number), 'lucro': df[profit].map(_parse_number)}).dropna()
+        valid = valid[valid['receita'] != 0]
+        if not valid.empty:
+            indicators['margem_media_percentual'] = float((valid['lucro'] / valid['receita'] * 100).mean())
+            indicators['formula_margem'] = '(lucro / receita) * 100, somente quando receita != 0'
+    price = next((column for column in numeric if any(term in _normalizar(column)
+                 for term in ('preco', 'precos', 'price'))), None)
+    if price and date_name:
+        indicators['variacao_observada_serie_de_precos'] = comparar_periodos(df, date_name, price, agregacao='mean')
+        indicators['limitacao_inflacao'] = ('Isto mede a variação da série de preços fornecida; não é inflação geral sem cesta, pesos, cobertura e metodologia representativos.')
     if len(numeric) >= 2:
-        corr = df[numeric[:8]].corr(method='pearson', min_periods=3)
-        pairs = []
-        for i, left in enumerate(corr.columns):
-            for right in corr.columns[i + 1:]:
-                value = corr.loc[left, right]
-                if pd.notna(value) and abs(float(value)) >= 0.7:
-                    pairs.append((abs(float(value)), f'{left} e {right}: {float(value):.2f}'))
-        if pairs:
-            sections.append('Correlações lineares mais fortes (associação, não causalidade): ' + '; '.join(x[1] for x in sorted(pairs, reverse=True)[:5]) + '.')
+        corr = df[numeric].corr(method='pearson', min_periods=3)
+        indicators['correlacoes'] = [
+            {'variaveis': [str(left), str(right)], 'correlacao_pearson': float(corr.loc[left, right]),
+             'limitacao': 'associação linear, não causalidade'}
+            for i, left in enumerate(corr.columns) for right in corr.columns[i + 1:]
+            if pd.notna(corr.loc[left, right])
+        ]
+    indicators['atipicos'] = {str(column): identificar_atipicos(df, column)
+                              for column in numeric[:8]}
+    return indicators
 
+
+def _relatorio(frame, filename):
+    df = frame.copy()
+    inspection = inspecionar_dados(df, amostra=3)
+    stats = estatistica_descritiva(df)
+    indicators = calcular_indicadores(df)
+    sections = [f'Base: {filename}. Linhas: {inspection["linhas"]}. Colunas: {inspection["colunas"]}.']
+    if inspection['periodo']:
+        sections.append(f'Período: {inspection["periodo"]["inicio"]} a {inspection["periodo"]["fim"]}.')
+    sections.append('Colunas numéricas: ' + (', '.join(inspection['colunas_numericas']) or 'nenhuma') + '.')
+    if inspection['colunas_categoricas']:
+        sections.append('Colunas categóricas: ' + ', '.join(inspection['colunas_categoricas'][:12]) + '.')
+    if inspection['valores_ausentes']:
+        sections.append('Valores ausentes: ' + '; '.join(f'{key}: {value}' for key, value in inspection['valores_ausentes'].items()) + '.')
+    if inspection['duplicatas']:
+        sections.append(f'Duplicatas de linhas: {inspection["duplicatas"]}.')
+    if inspection['possiveis_erros_formatacao']:
+        sections.append('Possíveis erros de formatação: ' + '; '.join(item['coluna'] for item in inspection['possiveis_erros_formatacao']) + '.')
+    if inspection['amostra']:
+        sections.append('Amostra inicial: ' + json.dumps(inspection['amostra'], ensure_ascii=False, default=str) + '.')
+    if stats:
+        measures = []
+        for column, values in list(stats.items())[:8]:
+            measures.append(f'{column}: soma {values["soma"]:.2f}; média {values["media"]:.2f}; mediana {values["mediana"]:.2f}; mínimo {values["minimo"]:.2f}; máximo {values["maximo"]:.2f}; desvio-padrão {values["desvio_padrao"] if values["desvio_padrao"] is not None else "indisponível"}.')
+        sections.append('Estatística descritiva (unidades do arquivo): ' + ' '.join(measures))
+    categories = distribuicao_categorias(df)
+    if categories:
+        sections.append('Distribuição categórica: ' + json.dumps(categories, ensure_ascii=False)[:1600] + '.')
+    for column in inspection['colunas_numericas'][:6]:
+        evolution = comparar_periodos(df, inspection['coluna_data'], column) if inspection['coluna_data'] else {'disponivel': False}
+        if evolution.get('disponivel') and len(evolution['periodos']) >= 2:
+            first, last = evolution['periodos'][0], evolution['periodos'][-1]
+            change = last['variacao_percentual']
+            if change is not None:
+                sections.append(f'Variação de {column}: {first["valor"]:.2f} em {first["periodo"]} para {last["valor"]:.2f} em {last["periodo"]}; variação absoluta {last["variacao_absoluta"]:.2f}; percentual {change:.2f}%. Fórmula: ((valor_final - valor_inicial) / valor_inicial) * 100.')
+    if indicators.get('margem_media_percentual') is not None:
+        sections.append(f'Margem média observada: {indicators["margem_media_percentual"]:.2f}%. Fórmula: (lucro / receita) * 100; só calculada para receitas diferentes de zero.')
+    if indicators.get('variacao_observada_serie_de_precos', {}).get('disponivel'):
+        sections.append('A série de preços tem variação observada, mas não é uma medida de inflação geral: faltam metodologia, cesta, pesos e representatividade.' )
+    correlations = indicators.get('correlacoes', [])
+    if correlations:
+        strongest = sorted(correlations, key=lambda item: abs(item['correlacao_pearson']), reverse=True)[:5]
+        sections.append('Correlações de Pearson: ' + '; '.join(f'{item["variaveis"][0]} e {item["variaveis"][1]}: {item["correlacao_pearson"]:.2f}' for item in strongest) + '. Associação não implica causalidade.')
+    outliers = [f'{column}: {len(values.get("indices", []))}' for column, values in indicators.get('atipicos', {}).items() if values.get('disponivel') and values.get('indices')]
+    if outliers:
+        sections.append('Possíveis valores atípicos pelo método IQR: ' + '; '.join(outliers) + '.')
     return '\n'.join(sections)
 
 

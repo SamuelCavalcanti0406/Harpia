@@ -16,6 +16,18 @@ A análise usa Pandas e NumPy para calcular estatísticas descritivas, somas par
 
 Os arquivos são guardados localmente em `.local/economic_data/`, em uma pasta derivada da identidade autenticada de cada usuário. O `.local/` já é ignorado pelo Git. O arquivo integral não é enviado ao modelo: somente o resumo calculado é incluído no contexto do Ollama local.
 
+## Documentos com Docling
+
+O checkout em `C:\Users\samuc\Downloads\docling-main\docling-main` é código-fonte do projeto Docling, não uma instalação do pacote. O ambiente atual da HarpIA não o considera instalado. A dependência é opcional porque pode baixar componentes pesados para OCR e tabelas:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-docling.txt
+```
+
+Depois da instalação, envie o original para `POST /documentos` com o campo multipart `arquivo`. Esse passo apenas guarda o original. Liste os documentos com `GET /documentos` e importe somente o escolhido com `POST /documentos/{id}/importar`. O conteúdo importado passa a ser recuperável pelo `/chat`; tabelas podem ser baixadas em `GET /documentos/{id}/tabelas/{numero}/csv`.
+
+Os originais, o Markdown extraído, os CSVs de tabelas e os índices de pesquisa ficam separados em `.local/documents/`, por usuário. O sistema deduplica conteúdo idêntico e conserva versões anteriores quando o mesmo nome é atualizado. Macros, scripts e instruções presentes no conteúdo são tratados como dados e não são executados.
+
 ## Abertura automática no Windows
 
 Dê dois cliques em `Iniciar-HarpIA.bat`, na pasta principal do projeto. Ele prepara o ambiente, inicia o Ollama e o backend e abre um chat autenticado no terminal. A credencial fica criptografada para seu login do Windows. Consulte `../LEIA-ME.md` para os comandos do chat, primeiro acesso e diagnóstico. O histórico antigo não é atribuído automaticamente.

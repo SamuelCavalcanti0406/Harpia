@@ -65,6 +65,9 @@ def montar_contexto(pergunta, linhas, documentos, pesquisa_atual=False,
         system_text += (' Para análises econômicas, baseie números nas estatísticas calculadas fornecidas; '
                         'não invente valores nem suponha moeda ou unidade. Informe o período dos dados quando disponível. '
                         'Descreva correlação como associação, nunca como causa. Se faltarem colunas ou período, explique a limitação.')
+    if any(doc.get('tipo') == 'documento' for doc in documentos):
+        system_text += (' Para perguntas sobre documentos, use somente os trechos fornecidos, identifique o arquivo '
+                         'e a página ou seção quando disponíveis, e diga quando o trecho não for suficiente.')
     if pesquisa_atual:
         system_text += (' A pergunta depende de informação atual: base a resposta nas fontes web fornecidas, '
                         'não trate data de publicação como data do acontecimento e não complete lacunas com conhecimento antigo.')

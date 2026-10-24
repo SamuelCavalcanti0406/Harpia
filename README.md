@@ -15,6 +15,7 @@ A HarpIA é uma assistente de inteligência artificial executada localmente com 
 - Conversas privadas por usuário e API protegida por credencial.
 - Pesquisa opcional na web com links das fontes consultadas.
 - Análise local de bases econômicas CSV e Excel com Pandas e NumPy.
+- Leitura controlada de PDF, DOCX e HTML com Docling quando a dependência opcional está instalada.
 
 ## Começar no Windows
 
