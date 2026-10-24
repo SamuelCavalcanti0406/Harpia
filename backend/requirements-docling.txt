@@ -1,3 +1,0 @@
-# Dependência opcional para leitura local de PDF, DOCX e HTML.
-# A versão corresponde ao código-fonte encontrado em Downloads/docling-main.
-docling==2.142.1

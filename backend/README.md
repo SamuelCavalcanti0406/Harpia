@@ -2,9 +2,9 @@
 
 Assistente local em português com Ollama, busca documental, análises econômicas locais e conversas privadas por usuário.
 
-## Análise econômica de planilhas locais
+## Análise econômica de arquivos e planilhas locais
 
-No chat local, use `/importar "C:\\caminho\\da\\base.xlsx"` para enviar uma base CSV ou XLSX. CSV deve ter cabeçalhos na primeira linha; em Excel, a HarpIA lê a primeira aba. O limite é 25 MB, 200 mil linhas e 100 colunas. `/bases` lista os arquivos daquele usuário; a base enviada mais recentemente é usada nas análises.
+No chat local, use `/importar "C:\\caminho\\da\\base.xlsx"` (ou `"base.pdf"`) para enviar uma base CSV, XLSX ou PDF. CSV deve ter cabeçalhos na primeira linha; em Excel, a HarpIA lê a primeira aba; em PDF, a HarpIA extrai automaticamente a tabela com cabeçalhos e colunas numéricas. O limite é 25 MB, 200 mil linhas e 100 colunas. `/bases` lista os arquivos daquele usuário; a base enviada mais recentemente é usada nas análises.
 
 Exemplos de perguntas:
 
@@ -16,15 +16,11 @@ A análise usa Pandas e NumPy para calcular estatísticas descritivas, somas par
 
 Os arquivos são guardados localmente em `.local/economic_data/`, em uma pasta derivada da identidade autenticada de cada usuário. O `.local/` já é ignorado pelo Git. O arquivo integral não é enviado ao modelo: somente o resumo calculado é incluído no contexto do Ollama local.
 
-## Documentos com Docling
+## Documentos com PyMuPDF (fitz)
 
-O checkout em `C:\Users\samuc\Downloads\docling-main\docling-main` é código-fonte do projeto Docling, não uma instalação do pacote. O ambiente atual da HarpIA não o considera instalado. A dependência é opcional porque pode baixar componentes pesados para OCR e tabelas:
+A HarpIA utiliza PyMuPDF (`fitz`) para leitura de PDFs com baixo consumo de memória RAM (gerenciador de contexto `with fitz.open()` iterando página por página e gerando chunks imediatos de 1000 caracteres com 100 de overlap).
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-docling.txt
-```
-
-Depois da instalação, envie o original para `POST /documentos` com o campo multipart `arquivo`. Esse passo apenas guarda o original. Liste os documentos com `GET /documentos` e importe somente o escolhido com `POST /documentos/{id}/importar`. O conteúdo importado passa a ser recuperável pelo `/chat`; tabelas podem ser baixadas em `GET /documentos/{id}/tabelas/{numero}/csv`.
+Envie o original para `POST /documentos` com o campo multipart `arquivo`. Esse passo apenas guarda o original. Liste os documentos com `GET /documentos` e importe o escolhido com `POST /documentos/{id}/importar`. O conteúdo importado passa a ser recuperável pelo `/chat`; tabelas podem ser baixadas em `GET /documentos/{id}/tabelas/{numero}/csv`.
 
 Os originais, o Markdown extraído, os CSVs de tabelas e os índices de pesquisa ficam separados em `.local/documents/`, por usuário. O sistema deduplica conteúdo idêntico e conserva versões anteriores quando o mesmo nome é atualizado. Macros, scripts e instruções presentes no conteúdo são tratados como dados e não são executados.
 

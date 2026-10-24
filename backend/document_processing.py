@@ -1,14 +1,15 @@
-"""Processamento documental local com Docling, sem executar conteúdo dos arquivos.
+"""Processamento documental local com PyMuPDF (fitz), sem executar conteúdo dos arquivos.
 
-O pacote Docling é opcional no ambiente atual. O módulo mantém os originais,
-os resultados derivados e o índice em diretórios separados por usuário. A
-conversão só ocorre quando o usuário chama a operação de importação.
+O módulo utiliza PyMuPDF para extração eficiente de texto página por página,
+otimizado para baixo consumo de memória RAM (gerenciador de contexto with fitz.open()).
+Divide o texto em blocos (chunks) de 1000 caracteres com sobreposição de 100 caracteres,
+prontos para consumo pelo LLM. Mantém os originais, os resultados derivados e o índice
+em diretórios separados por usuário.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from functools import lru_cache
 import hashlib
 import json
 import os
@@ -19,19 +20,22 @@ import uuid
 
 import pandas as pd
 
+try:
+    import pymupdf as fitz
+except ImportError:
+    import fitz
+
 
 DOCUMENT_ROOT = Path(__file__).resolve().parent.parent / ".local" / "documents"
 MAX_UPLOAD_BYTES = int(os.getenv("HARPIA_DOCUMENT_MAX_BYTES", str(25 * 1024 * 1024)))
 MAX_INDEX_CHUNKS = int(os.getenv("HARPIA_DOCUMENT_MAX_INDEX_CHUNKS", "5000"))
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".html", ".htm"}
+CHUNK_SIZE_DEFAULT = 1000
+CHUNK_OVERLAP_DEFAULT = 100
+SUPPORTED_EXTENSIONS = {".pdf"}
 
 
 class DocumentProcessingError(ValueError):
     """Erro seguro para apresentar ao cliente sem expor caminhos locais."""
-
-
-class DoclingUnavailableError(DocumentProcessingError):
-    """Docling não está instalado no ambiente virtual ativo."""
 
 
 @dataclass
@@ -67,7 +71,7 @@ def _safe_name(filename: str | None) -> str:
     stem = re.sub(r"[^\w.-]+", "_", original.stem, flags=re.UNICODE).strip("._")[:80]
     suffix = original.suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
-        raise DocumentProcessingError("Formato não aceito. Envie PDF, DOCX ou HTML.")
+        raise DocumentProcessingError("Formato não aceito. Envie PDF.")
     return (stem or "documento") + suffix
 
 
@@ -100,7 +104,7 @@ def _write_registry(owner_id: str, records: list[dict]) -> None:
 
 
 def _public_record(record: dict) -> dict:
-    result = {
+    return {
         "id": record["id"],
         "nome": record["nome"],
         "tipo": record["tipo"],
@@ -115,7 +119,16 @@ def _public_record(record: dict) -> dict:
         "secoes": record.get("secoes", []),
         "tabelas": record.get("tabelas", []),
     }
-    return result
+
+
+def _json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        if isinstance(value, float) and pd.isna(value):
+            return None
+        return value
+    if hasattr(value, "item"):
+        return _json_safe(value.item())
+    return str(value)
 
 
 def registrar_upload(owner_id: str, filename: str | None, stream) -> dict:
@@ -206,159 +219,156 @@ def _record(owner_id: str, document_id: str) -> tuple[list[dict], dict]:
     raise DocumentProcessingError("Documento não encontrado.")
 
 
-def _load_docling():
+def extrair_chunks_pdf(
+    caminho: str | Path,
+    chunk_size: int = CHUNK_SIZE_DEFAULT,
+    overlap: int = CHUNK_OVERLAP_DEFAULT,
+) -> list[str]:
+    """Lê o PDF iterando página por página usando with fitz.open() para poupar memória RAM.
+
+    O texto extraído é imediatamente dividido em chunks de 1000 caracteres, com uma
+    sobreposição (overlap) de 100 caracteres entre eles.
+    Retorna uma lista de strings fragmentadas prontas para o LLM.
+    """
+    path = Path(caminho)
+    if not path.is_file():
+        raise DocumentProcessingError("O documento original não foi encontrado.")
+    if path.stat().st_size == 0:
+        raise DocumentProcessingError("O documento está vazio.")
+
+    step = chunk_size - overlap
+    if step <= 0:
+        raise ValueError("chunk_size deve ser estritamente maior que overlap.")
+
+    chunks: list[str] = []
+    buffer = ""
+
     try:
-        from docling.document_converter import DocumentConverter
-    except ImportError as exc:
-        raise DoclingUnavailableError(
-            "O Docling não está instalado no ambiente virtual da HarpIA. "
-            "Instale a dependência opcional e tente novamente."
-        ) from exc
-    return DocumentConverter
-
-
-@lru_cache(maxsize=1)
-def _converter():
-    return _load_docling()()
-
-
-def docling_disponivel() -> bool:
-    try:
-        _load_docling()
-    except DoclingUnavailableError:
-        return False
-    return True
-
-
-def _pages(item) -> list[int]:
-    pages = []
-    for provenance in getattr(item, "prov", []) or []:
-        page = getattr(provenance, "page_no", None)
-        if isinstance(page, int) and page > 0:
-            pages.append(page)
-    return sorted(set(pages))
-
-
-def _label(item) -> str:
-    return str(getattr(item, "label", "")).lower()
-
-
-def _is_section(item) -> bool:
-    label = _label(item)
-    return any(term in label for term in ("title", "section_header", "heading"))
-
-
-def _json_safe(value):
-    if value is None or isinstance(value, (str, int, float, bool)):
-        if isinstance(value, float) and pd.isna(value):
-            return None
-        return value
-    if hasattr(value, "item"):
-        return _json_safe(value.item())
-    return str(value)
-
-
-def _table_data(table, document, number: int) -> tuple[dict, str]:
-    try:
-        frame = table.export_to_dataframe(doc=document)
+        with fitz.open(str(path)) as doc:
+            for page in doc:
+                texto_pagina = page.get_text() or ""
+                if not texto_pagina:
+                    continue
+                buffer += texto_pagina
+                while len(buffer) >= chunk_size:
+                    chunks.append(buffer[:chunk_size])
+                    buffer = buffer[step:]
+                    if len(chunks) >= MAX_INDEX_CHUNKS:
+                        break
+                if len(chunks) >= MAX_INDEX_CHUNKS:
+                    break
     except Exception as exc:
-        raise DocumentProcessingError(f"A tabela {number} não pôde ser estruturada.") from exc
-    frame = frame.copy()
-    frame.columns = [str(column) for column in frame.columns]
-    records = [
-        {str(key): _json_safe(value) for key, value in row.items()}
-        for row in frame.to_dict(orient="records")
-    ]
-    if frame.empty:
-        markdown = "(tabela vazia)"
-    else:
-        try:
-            markdown = frame.to_markdown(index=False)
-        except (ImportError, ModuleNotFoundError):
-            markdown = frame.to_csv(index=False)
-    return {
-        "numero": number,
-        "linhas": int(frame.shape[0]),
-        "colunas": int(frame.shape[1]),
-        "nomes_colunas": frame.columns.tolist(),
-        "dados": records,
-        "paginas": _pages(table),
-    }, markdown
+        if isinstance(exc, DocumentProcessingError):
+            raise
+        raise DocumentProcessingError(f"Erro ao ler PDF com PyMuPDF: {exc}") from exc
+
+    if len(chunks) == 0:
+        if buffer.strip():
+            chunks.append(buffer)
+    elif len(buffer) > overlap and buffer.strip():
+        chunks.append(buffer[:chunk_size])
+
+    return chunks
+
+
+# Aliases convenientes para interoperabilidade
+processar_pdf = extrair_chunks_pdf
+ler_pdf_chunks = extrair_chunks_pdf
+extrair_texto_pdf_chunks = extrair_chunks_pdf
 
 
 def processar_arquivo(path: Path, converter=None) -> ProcessedDocument:
-    """Converte um original com a API oficial DocumentConverter.convert."""
+    """Processa o PDF localmente utilizando PyMuPDF (fitz) página por página."""
     path = Path(path)
     if not path.is_file():
         raise DocumentProcessingError("O documento original não foi encontrado.")
     if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
-        raise DocumentProcessingError("Formato não aceito. Envie PDF, DOCX ou HTML.")
+        raise DocumentProcessingError("Formato não aceito. Envie PDF.")
     if path.stat().st_size == 0:
         raise DocumentProcessingError("O documento está vazio.")
     if path.stat().st_size > MAX_UPLOAD_BYTES:
         raise DocumentProcessingError("O documento excede o limite configurado.")
-    converter = converter or _converter()
-    try:
-        result = converter.convert(str(path))
-    except Exception as exc:
-        raise DocumentProcessingError("O Docling não conseguiu converter o documento.") from exc
-    status = str(getattr(result, "status", "")).upper()
-    if "FAILURE" in status:
-        raise DocumentProcessingError("O Docling informou falha na conversão do documento.")
-    document = getattr(result, "document", None)
-    if document is None:
-        raise DocumentProcessingError("A conversão não retornou um documento estruturado.")
 
-    try:
-        markdown = str(document.export_to_markdown())
-    except Exception as exc:
-        raise DocumentProcessingError("Não foi possível exportar o texto estruturado.") from exc
+    raw_chunks = extrair_chunks_pdf(path, chunk_size=CHUNK_SIZE_DEFAULT, overlap=CHUNK_OVERLAP_DEFAULT)
 
-    chunks = []
-    pages = set()
-    sections = []
-    current_section = None
-    for entry in document.iterate_items():
-        item = entry[0] if isinstance(entry, (tuple, list)) else entry
-        text = str(getattr(item, "text", "") or "").strip()
-        item_pages = _pages(item)
-        pages.update(item_pages)
-        if _is_section(item) and text:
-            current_section = text[:200]
-            sections.append(current_section)
-        if text:
-            chunks.append(
-                {
-                    "conteudo": text[:1200],
-                    "pagina": item_pages[0] if item_pages else None,
-                    "paginas": item_pages,
-                    "secao": current_section,
-                    "nivel": entry[1] if isinstance(entry, (tuple, list)) and len(entry) > 1 else None,
-                }
-            )
-        if len(chunks) >= MAX_INDEX_CHUNKS:
-            break
-
+    pages_list = []
     tables = []
+    markdown_parts = []
     table_markdown = []
-    for number, table in enumerate(getattr(document, "tables", []) or [], 1):
-        data, table_md = _table_data(table, document, number)
-        tables.append(data)
-        table_markdown.append(f"Tabela {number}:\n{table_md[:4000]}")
-        pages.update(data["paginas"])
+
+    try:
+        with fitz.open(str(path)) as doc:
+            table_idx = 1
+            for page_num, page in enumerate(doc, start=1):
+                pages_list.append(page_num)
+                text = page.get_text() or ""
+                if text.strip():
+                    markdown_parts.append(text.strip())
+
+                # Extrai tabelas caso existam na página
+                try:
+                    tab_finder = page.find_tables()
+                    for tab in getattr(tab_finder, "tables", []):
+                        df = tab.to_pandas()
+                        if df is not None and not df.empty:
+                            df.columns = [str(c) for c in df.columns]
+                            records = [
+                                {str(k): _json_safe(v) for k, v in row.items()}
+                                for row in df.to_dict(orient="records")
+                            ]
+                            try:
+                                t_md = df.to_markdown(index=False)
+                            except Exception:
+                                t_md = df.to_csv(index=False)
+                            tables.append({
+                                "numero": table_idx,
+                                "linhas": int(df.shape[0]),
+                                "colunas": int(df.shape[1]),
+                                "nomes_colunas": df.columns.tolist(),
+                                "dados": records,
+                                "paginas": [page_num],
+                            })
+                            table_markdown.append(f"Tabela {table_idx}:\n{t_md[:4000]}")
+                            table_idx += 1
+                except Exception:
+                    pass
+    except Exception as exc:
+        if isinstance(exc, DocumentProcessingError):
+            raise
+        raise DocumentProcessingError(f"Falha ao processar o PDF com PyMuPDF: {exc}") from exc
+
+    full_markdown = "\n\n".join(markdown_parts)
+
+    structured_chunks = [
+        {
+            "conteudo": chunk,
+            "pagina": None,
+            "paginas": pages_list,
+            "secao": None,
+            "nivel": None,
+        }
+        for chunk in raw_chunks
+    ]
+
+    if table_markdown:
+        structured_chunks.extend(
+            {"conteudo": t_md, "pagina": None, "paginas": [], "secao": None, "nivel": None}
+            for t_md in table_markdown
+        )
 
     metadata = {
-        "paginas": sorted(pages),
-        "secoes": list(dict.fromkeys(sections)),
-        "quantidade_itens_texto": len(chunks),
+        "paginas": pages_list,
+        "secoes": [],
+        "quantidade_itens_texto": len(raw_chunks),
         "quantidade_tabelas": len(tables),
     }
-    if table_markdown:
-        chunks.extend(
-            {"conteudo": text, "pagina": None, "paginas": [], "secao": None, "nivel": None}
-            for text in table_markdown
-        )
-    return ProcessedDocument(markdown=markdown, tables=tables, metadata=metadata, chunks=chunks[:MAX_INDEX_CHUNKS])
+
+    return ProcessedDocument(
+        markdown=full_markdown,
+        tables=tables,
+        metadata=metadata,
+        chunks=structured_chunks[:MAX_INDEX_CHUNKS],
+    )
 
 
 def importar_documento(owner_id: str, document_id: str) -> dict:
@@ -420,7 +430,7 @@ def documentos_contexto(owner_id: str, question: str, limite: int = 3) -> list[d
         if not record.get("ativo", True) or not record.get("importado"):
             continue
         for chunk in _load_index(owner_id, record):
-            content = str(chunk.get("conteudo", ""))
+            content = str(chunk.get("conteudo", "")) if isinstance(chunk, dict) else str(chunk)
             words = _tokens(content)
             matched = query & words
             if not matched:
@@ -430,10 +440,10 @@ def documentos_contexto(owner_id: str, question: str, limite: int = 3) -> list[d
                 {
                     "tipo": "documento",
                     "fonte": record["nome"],
-                    "trecho": "página " + str(chunk.get("pagina")) if chunk.get("pagina") else "seção",
+                    "trecho": f"página {chunk.get('pagina')}" if isinstance(chunk, dict) and chunk.get("pagina") else "trecho",
                     "conteudo": content,
                     "pontuacao": round(score, 4),
-                    "secao": chunk.get("secao"),
+                    "secao": chunk.get("secao") if isinstance(chunk, dict) else None,
                 }
             )
     candidates.sort(key=lambda item: (-item["pontuacao"], item["fonte"], item["trecho"]))

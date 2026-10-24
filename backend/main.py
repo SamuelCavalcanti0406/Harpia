@@ -19,7 +19,6 @@ from auth import usuario_atual
 from context import montar_contexto, NUM_CTX, RESPONSE_TOKENS, INPUT_BUDGET
 from document_processing import (
     DocumentProcessingError,
-    DoclingUnavailableError,
     documentos_contexto,
     exportar_tabela_csv,
     importar_documento,
@@ -109,8 +108,6 @@ def listar_documentos_api(usuario: str=Depends(usuario_atual)):
 def importar_documento_api(documento_id: str,usuario: str=Depends(usuario_atual)):
     try:
         return importar_documento(usuario,documento_id)
-    except DoclingUnavailableError as exc:
-        raise HTTPException(503,str(exc)) from exc
     except DocumentProcessingError as exc:
         raise HTTPException(400,str(exc)) from exc
 

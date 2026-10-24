@@ -15,7 +15,7 @@ DATA_ROOT = Path(__file__).resolve().parent.parent / '.local' / 'economic_data'
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_ROWS = 200_000
 MAX_COLUMNS = 100
-ALLOWED_EXTENSIONS = {'.csv', '.xlsx'}
+ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.pdf'}
 ANALYSIS_WORDS = re.compile(
     r'\b(analis\w*|dados?|econom\w*|fatur\w*|receit\w*|despes\w*|'
     r'custos?|lucros?|margens?|vend\w*|estoques?|pedidos?|quantidades?|'
@@ -122,6 +122,229 @@ def _normalizar(text):
                    if unicodedata.category(ch) != 'Mn')
 
 
+def _extrair_linhas_pdfium(path):
+    try:
+        import pypdfium2
+    except ImportError as exc:
+        raise EconomicDataError('O pacote pypdfium2 é necessário para leitura de PDFs.') from exc
+    try:
+        doc = pypdfium2.PdfDocument(str(path))
+    except Exception as exc:
+        raise EconomicDataError('Não foi possível ler o arquivo PDF. Verifique se o arquivo não está corrompido ou protegido por senha.') from exc
+
+    all_lines = []
+    try:
+        for page in doc:
+            textpage = page.get_textpage()
+            chars = []
+            n_chars = textpage.count_chars()
+            for i in range(n_chars):
+                c = textpage.get_text_range(i, 1)
+                if c in ('\r', '\n'):
+                    continue
+                box = textpage.get_charbox(i)
+                chars.append({'char': c, 'l': box[0], 'b': box[1], 'r': box[2]})
+
+            chars.sort(key=lambda x: -x['b'])
+            lines = []
+            cur_line = []
+            cur_y = None
+            for c in chars:
+                if cur_y is None or abs(c['b'] - cur_y) <= 3:
+                    cur_line.append(c)
+                    cur_y = c['b'] if cur_y is None else (cur_y + c['b']) / 2
+                else:
+                    cur_line.sort(key=lambda x: x['l'])
+                    lines.append(cur_line)
+                    cur_line = [c]
+                    cur_y = c['b']
+            if cur_line:
+                cur_line.sort(key=lambda x: x['l'])
+                lines.append(cur_line)
+
+            for line in lines:
+                buf = ''
+                prev_r = None
+                for c in line:
+                    if prev_r is not None:
+                        gap = c['l'] - prev_r
+                        if gap > 10:
+                            buf += '    '
+                        elif gap > 3.5:
+                            buf += ' '
+                    buf += c['char']
+                    prev_r = c['r']
+                if buf.strip():
+                    all_lines.append(buf.strip())
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
+    return all_lines
+
+
+def _extrair_linhas_texto_simples(path):
+    try:
+        import pypdfium2
+        doc = pypdfium2.PdfDocument(str(path))
+        lines = []
+        try:
+            for page in doc:
+                txt = page.get_textpage().get_text_range()
+                for l in txt.splitlines():
+                    if l.strip():
+                        lines.append(l.strip())
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
+        return lines
+    except Exception:
+        return []
+
+
+def _parse_row(line):
+    s = line.strip()
+    if not s:
+        return None
+    if '|' in s:
+        parts = [p.strip() for p in s.strip('|').split('|')]
+        if all(re.match(r'^:?-+:?$', p) for p in parts if p):
+            return 'SEPARATOR'
+        if len(parts) >= 2:
+            return parts
+    if ';' in s:
+        parts = [p.strip() for p in s.split(';')]
+        if len(parts) >= 2:
+            return parts
+    parts = [p.strip() for p in re.split(r'\s{2,}|\t', s) if p.strip()]
+    if len(parts) >= 2:
+        return parts
+    if ',' in s and not re.search(r'^\d+,\d+$', s):
+        parts = [p.strip() for p in s.split(',') if p.strip()]
+        if len(parts) >= 2:
+            return parts
+    return None
+
+
+def _tabelas_de_linhas(lines):
+    raw_tables = []
+    current_table = []
+    current_cols = None
+
+    for l in lines:
+        parsed = _parse_row(l)
+        if parsed == 'SEPARATOR':
+            continue
+        if parsed is None:
+            if current_table and len(current_table) >= 2:
+                raw_tables.append(current_table)
+            current_table = []
+            current_cols = None
+            continue
+
+        if current_table and [p.lower() for p in parsed] == [p.lower() for p in current_table[0]]:
+            continue
+
+        ncols = len(parsed)
+        if current_cols is None:
+            current_cols = ncols
+            current_table = [parsed]
+        elif ncols == current_cols:
+            current_table.append(parsed)
+        else:
+            if len(current_table) >= 2:
+                raw_tables.append(current_table)
+            current_cols = ncols
+            current_table = [parsed]
+
+    if current_table and len(current_table) >= 2:
+        raw_tables.append(current_table)
+
+    merged = []
+    for t in raw_tables:
+        if not merged:
+            merged.append(t)
+        else:
+            last = merged[-1]
+            if [p.lower() for p in t[0]] == [p.lower() for p in last[0]]:
+                last.extend(t[1:])
+            else:
+                merged.append(t)
+
+    frames = []
+    for t in merged:
+        headers = [str(c).strip().replace('\n', ' ')[:100] or f'coluna_{i + 1}'
+                   for i, c in enumerate(t[0])]
+        unique_headers = []
+        counts = {}
+        for h in headers:
+            if h in counts:
+                counts[h] += 1
+                unique_headers.append(f'{h}_{counts[h]}')
+            else:
+                counts[h] = 0
+                unique_headers.append(h)
+        frames.append(pd.DataFrame(t[1:], columns=unique_headers))
+    return frames
+
+
+def _score_table(df):
+    if df.empty or len(df.columns) < 2 or len(df) < 1:
+        return -1
+    numeric_cols = _colunas_numericas(df.copy())
+    if not numeric_cols:
+        return -1
+    economic_matches = sum(1 for col in df.columns if _relevante(str(col)))
+    date_col, _ = _data_column(df.copy())
+    score = (
+        len(numeric_cols) * 20
+        + economic_matches * 15
+        + (10 if date_col else 0)
+        + min(len(df), 200)
+    )
+    return score
+
+
+
+
+def _ler_pdf(path):
+    path = Path(path)
+    if not path.is_file():
+        raise EconomicDataError('Arquivo não encontrado.')
+    if path.stat().st_size == 0:
+        raise EconomicDataError('A base está vazia.')
+
+    candidate_frames = []
+    try:
+        lines = _extrair_linhas_pdfium(path)
+        candidate_frames.extend(_tabelas_de_linhas(lines))
+        if not candidate_frames:
+            lines_simple = _extrair_linhas_texto_simples(path)
+            candidate_frames.extend(_tabelas_de_linhas(lines_simple))
+    except EconomicDataError:
+        raise
+    except Exception as exc:
+        raise EconomicDataError('Não foi possível ler o arquivo PDF. Verifique se o arquivo não está corrompido ou protegido por senha.') from exc
+
+    scored = []
+    for f in candidate_frames:
+        score = _score_table(f)
+        if score > 0:
+            scored.append((score, f))
+
+    if scored:
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return scored[0][1]
+
+    raise EconomicDataError(
+        'Não foi possível identificar dados econômicos tabulares no PDF. '
+        'Certifique-se de que o documento contém tabelas com cabeçalhos e valores numéricos.'
+    )
+
+
 def _ler_arquivo(path, ext):
     try:
         if ext == '.csv':
@@ -131,11 +354,17 @@ def _ler_arquivo(path, ext):
             except UnicodeDecodeError:
                 frame = pd.read_csv(path, sep=None, engine='python', encoding='cp1252',
                                     nrows=MAX_ROWS + 1)
-        else:
+        elif ext == '.xlsx':
             frame = pd.read_excel(path, sheet_name=0, engine='openpyxl',
                                   nrows=MAX_ROWS + 1)
+        elif ext == '.pdf':
+            frame = _ler_pdf(path)
+        else:
+            raise EconomicDataError('Formato não aceito. Envie um arquivo CSV, XLSX ou PDF.')
+    except EconomicDataError:
+        raise
     except Exception as exc:
-        raise EconomicDataError('Não consegui ler a planilha. Confira se o CSV ou XLSX está válido e tem cabeçalhos na primeira linha.') from exc
+        raise EconomicDataError('Não consegui ler a base. Confira se o CSV, XLSX ou PDF está válido e tem cabeçalhos na primeira linha.') from exc
     if len(frame) > MAX_ROWS:
         raise EconomicDataError(f'A base excede o limite de {MAX_ROWS:,} linhas.')
     if len(frame.columns) > MAX_COLUMNS:
@@ -162,7 +391,7 @@ def salvar_upload(owner_id, filename, stream):
     safe = _safe_name(filename)
     ext = Path(safe).suffix
     if ext not in ALLOWED_EXTENSIONS:
-        raise EconomicDataError('Formato não aceito. Envie um arquivo CSV ou XLSX.')
+        raise EconomicDataError('Formato não aceito. Envie um arquivo CSV, XLSX ou PDF.')
     folder = _owner_dir(owner_id)
     folder.mkdir(parents=True, exist_ok=True)
     upload_id = uuid.uuid4().hex
@@ -460,7 +689,8 @@ def documentos_analise(owner_id, question):
         if not REQUESTS_DATA.search(_normalizar(question)):
             return []
         content = ('Nenhuma base econômica foi enviada para este usuário. Oriente a pessoa a usar '
-                   '`/importar "caminho do arquivo.csv"` ou `/importar "caminho do arquivo.xlsx"` '
+                   '`/importar "caminho do arquivo.csv"`, `/importar "caminho do arquivo.xlsx"` '
+                   'ou `/importar "caminho do arquivo.pdf"` '
                    'no chat local e depois fazer a pergunta novamente.')
         return [{'tipo': 'analise_economica', 'fonte': 'Orientação de importação',
                  'trecho': '1', 'conteudo': content}]

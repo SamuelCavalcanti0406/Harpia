@@ -235,8 +235,8 @@ def conversar_terminal(client):
                 source = Path(raw_path).expanduser()
                 if not source.is_file():
                     print('Arquivo nao encontrado. Informe o caminho entre aspas se houver espacos.'); continue
-                if source.suffix.lower() not in {'.csv', '.xlsx'}:
-                    print('Formato nao aceito. Use um arquivo CSV ou XLSX.'); continue
+                if source.suffix.lower() not in {'.csv', '.xlsx', '.pdf'}:
+                    print('Formato nao aceito. Use um arquivo CSV, XLSX ou PDF.'); continue
                 with source.open('rb') as handle:
                     response = client.post('/dados', files={'arquivo': (source.name, handle, 'application/octet-stream')})
                 if not response.is_success:

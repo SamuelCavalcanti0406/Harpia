@@ -85,5 +85,23 @@ class LauncherTests(unittest.TestCase):
         with patch.object(iniciar, 'preparar_ollama'), patch.object(iniciar, 'credencial_local', return_value=token), patch.object(iniciar, 'conversar_terminal', side_effect=interact):
             iniciar.executar()
 
+    def test_import_command_supports_pdf(self):
+        posted = []
+        def handler(request):
+            if request.url.path == '/dados' and request.method == 'POST':
+                posted.append(request)
+                return httpx.Response(200, json={'nome': 'dados.pdf', 'linhas': 10, 'colunas': ['a', 'b']})
+            return httpx.Response(200, json=[])
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_pdf:
+            temp_pdf.write(b'%PDF-fake')
+            pdf_path = temp_pdf.name
+        try:
+            with httpx.Client(base_url='http://test', transport=httpx.MockTransport(handler)) as client:
+                with patch('builtins.input', side_effect=[f'/importar "{pdf_path}"', '/sair']):
+                    iniciar.conversar_terminal(client)
+            self.assertEqual(len(posted), 1)
+        finally:
+            Path(pdf_path).unlink(missing_ok=True)
+
 
 if __name__ == '__main__': unittest.main()

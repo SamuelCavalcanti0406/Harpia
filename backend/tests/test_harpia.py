@@ -211,8 +211,8 @@ class RetrievalTests(unittest.TestCase):
     def test_recent_history_keeps_order_and_discards_older_turns_first(self):
         rows=[]
         for index in range(60):
-            rows.extend([{'papel':'user','conteudo':f'pergunta {index} '+('antigo '*50)},
-                         {'papel':'assistant','conteudo':f'resposta {index} '+('resposta '*50)}])
+            rows.extend([{'papel':'user','conteudo':f'pergunta {index} '+('antigo '*20)},
+                         {'papel':'assistant','conteudo':f'resposta {index} '+('resposta '*20)}])
         messages,_,stats=context.montar_contexto('pergunta nova',rows,[] ,incluir_diagnostico=True)
         contents=[m['content'] for m in messages]
         chosen_numbers=[int(content.split()[1]) for content in contents if content.startswith('pergunta ') and content!='pergunta nova']

@@ -14,8 +14,8 @@ A HarpIA é uma assistente de inteligência artificial executada localmente com 
 - Busca em documentos locais para complementar as respostas.
 - Conversas privadas por usuário e API protegida por credencial.
 - Pesquisa opcional na web com links das fontes consultadas.
-- Análise local de bases econômicas CSV e Excel com Pandas e NumPy.
-- Leitura controlada de PDF, DOCX e HTML com Docling quando a dependência opcional está instalada.
+- Análise local de bases econômicas CSV, Excel e PDF com Pandas e NumPy.
+- Leitura eficiente e fragmentação em chunks de PDFs com PyMuPDF (fitz) otimizada para baixo consumo de memória.
 
 ## Começar no Windows
 
@@ -25,7 +25,7 @@ Pré-requisitos: Python 3.11 ou posterior e [Ollama](https://ollama.com/download
 2. Na primeira execução, aguarde a preparação do ambiente e do modelo; o download inicial pode demorar.
 3. Faça uma pergunta no chat que será aberto no terminal.
 
-Para analisar dados de um estabelecimento, envie uma planilha CSV ou XLSX pelo comando `/importar "C:\\caminho\\da\\base.xlsx"`. Depois, pergunte sobre faturamento, custos, despesas, lucro ou tendências. Use `/bases` para ver os arquivos recebidos.
+Para analisar dados de um estabelecimento, envie uma planilha CSV, XLSX ou arquivo PDF com dados tabulares pelo comando `/importar "C:\\caminho\\da\\base.xlsx"` (ou `"base.pdf"`). Depois, pergunte sobre faturamento, custos, despesas, lucro ou tendências. Use `/bases` para ver os arquivos recebidos.
 
 As bases ficam no computador, separadas por usuário, e não são incluídas no Git. A HarpIA envia somente resumos numéricos ao modelo local para explicar os resultados.
 
