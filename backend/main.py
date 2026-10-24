@@ -30,6 +30,7 @@ from knowledge import pesquisar, assunto_anterior
 from storage import get_conn, init_db
 from web_search import pesquisar_web, precisa_pesquisa
 
+
 load_dotenv(Path(__file__).resolve().parent / '.env')
 
 logger=logging.getLogger('harpia')

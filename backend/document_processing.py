@@ -7,7 +7,6 @@ prontos para consumo pelo LLM. Mantém os originais, os resultados derivados e o
 em diretórios separados por usuário.
 """
 from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -17,15 +16,13 @@ from pathlib import Path
 import re
 import unicodedata
 import uuid
-
 import pandas as pd
 
 try:
     import pymupdf as fitz
 except ImportError:
     import fitz
-
-
+    
 DOCUMENT_ROOT = Path(__file__).resolve().parent.parent / ".local" / "documents"
 MAX_UPLOAD_BYTES = int(os.getenv("HARPIA_DOCUMENT_MAX_BYTES", str(25 * 1024 * 1024)))
 MAX_INDEX_CHUNKS = int(os.getenv("HARPIA_DOCUMENT_MAX_INDEX_CHUNKS", "5000"))
@@ -426,26 +423,44 @@ def documentos_contexto(owner_id: str, question: str, limite: int = 3) -> list[d
     if not query or limite <= 0:
         return []
     candidates = []
+
+    # Detecta se a pergunta é um pedido genérico de resumo / apresentação do documento
+    termos_genericos = {"resumo", "resuma", "documento", "arquivo", "relatorio", "analise", "conteudo", "esse", "este", "sobre"}
+    eh_pedido_resumo = len(query - termos_genericos) == 0
+
     for record in _read_registry(owner_id):
         if not record.get("ativo", True) or not record.get("importado"):
             continue
-        for chunk in _load_index(owner_id, record):
+        chunks = _load_index(owner_id, record)
+        for i, chunk in enumerate(chunks):
             content = str(chunk.get("conteudo", "")) if isinstance(chunk, dict) else str(chunk)
             words = _tokens(content)
             matched = query & words
-            if not matched:
-                continue
-            score = len(matched) / max(1, len(query))
-            candidates.append(
-                {
-                    "tipo": "documento",
-                    "fonte": record["nome"],
-                    "trecho": f"página {chunk.get('pagina')}" if isinstance(chunk, dict) and chunk.get("pagina") else "trecho",
-                    "conteudo": content,
-                    "pontuacao": round(score, 4),
-                    "secao": chunk.get("secao") if isinstance(chunk, dict) else None,
-                }
-            )
+            if matched:
+                score = len(matched) / max(1, len(query))
+                candidates.append(
+                    {
+                        "tipo": "documento",
+                        "fonte": record["nome"],
+                        "trecho": f"página {chunk.get('pagina')}" if isinstance(chunk, dict) and chunk.get("pagina") else f"trecho {i+1}",
+                        "conteudo": content,
+                        "pontuacao": round(score, 4),
+                        "secao": chunk.get("secao") if isinstance(chunk, dict) else None,
+                    }
+                )
+            elif eh_pedido_resumo and i < limite:
+                # Em pedidos de resumo geral, prioriza os chunks iniciais (capa, sumário executivo, introdução)
+                candidates.append(
+                    {
+                        "tipo": "documento",
+                        "fonte": record["nome"],
+                        "trecho": f"página {chunk.get('pagina')}" if isinstance(chunk, dict) and chunk.get("pagina") else f"trecho {i+1}",
+                        "conteudo": content,
+                        "pontuacao": round(0.5 - (i * 0.05), 4),
+                        "secao": chunk.get("secao") if isinstance(chunk, dict) else None,
+                    }
+                )
+
     candidates.sort(key=lambda item: (-item["pontuacao"], item["fonte"], item["trecho"]))
     selected = []
     seen = set()

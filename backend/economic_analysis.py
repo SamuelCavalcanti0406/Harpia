@@ -423,7 +423,10 @@ def _data_column(df):
         key = _normalizar(column)
         if not any(term in key for term in ('data', 'date', 'periodo', 'competencia')):
             continue
-        series = pd.to_datetime(df[column], errors='coerce', dayfirst=True)
+        try:
+            series = pd.to_datetime(df[column], errors='coerce', dayfirst=True, format='mixed')
+        except (ValueError, TypeError):
+            series = pd.to_datetime(df[column], errors='coerce', dayfirst=True)
         if int(series.notna().sum()) >= max(1, math.ceil(df[column].notna().sum() * 0.7)):
             return column, series
     return None, None
@@ -546,7 +549,10 @@ def comparar_periodos(frame, coluna_data=None, coluna_valor=None, frequencia='M'
     if coluna_data is None:
         coluna_data, datas = _data_column(df)
     else:
-        datas = pd.to_datetime(df[coluna_data], errors='coerce', dayfirst=True)
+        try:
+            datas = pd.to_datetime(df[coluna_data], errors='coerce', dayfirst=True, format='mixed')
+        except (ValueError, TypeError):
+            datas = pd.to_datetime(df[coluna_data], errors='coerce', dayfirst=True)
     if not coluna_data or coluna_valor not in df.columns:
         return {'disponivel': False, 'motivo': 'É necessária uma coluna de data e uma coluna numérica.'}
     values = pd.to_numeric(df[coluna_valor].map(_parse_number), errors='coerce')

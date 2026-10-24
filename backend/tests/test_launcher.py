@@ -103,5 +103,30 @@ class LauncherTests(unittest.TestCase):
         finally:
             Path(pdf_path).unlink(missing_ok=True)
 
+    def test_documento_command_supports_pdf(self):
+        doc_posted = []
+        doc_imported = []
+        def handler(request):
+            if request.url.path == '/documentos' and request.method == 'POST':
+                doc_posted.append(request)
+                return httpx.Response(200, json={'id': 'doc-123', 'nome': 'relatorio.pdf'})
+            if request.url.path == '/documentos/doc-123/importar' and request.method == 'POST':
+                doc_imported.append(request)
+                return httpx.Response(200, json={'id': 'doc-123', 'nome': 'relatorio.pdf', 'paginas': [1, 2], 'status': 'processado'})
+            if request.url.path == '/documentos' and request.method == 'GET':
+                return httpx.Response(200, json=[{'id': 'doc-123', 'nome': 'relatorio.pdf', 'paginas': [1, 2], 'status': 'processado'}])
+            return httpx.Response(200, json=[])
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_pdf:
+            temp_pdf.write(b'%PDF-fake')
+            pdf_path = temp_pdf.name
+        try:
+            with httpx.Client(base_url='http://test', transport=httpx.MockTransport(handler)) as client:
+                with patch('builtins.input', side_effect=[f'/documento "{pdf_path}"', '/documentos', '/sair']):
+                    iniciar.conversar_terminal(client)
+            self.assertEqual(len(doc_posted), 1)
+            self.assertEqual(len(doc_imported), 1)
+        finally:
+            Path(pdf_path).unlink(missing_ok=True)
+
 
 if __name__ == '__main__': unittest.main()

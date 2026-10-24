@@ -198,7 +198,7 @@ def conversar_terminal(client):
     cid = None
     pending = None
     print('\nHarpIA pronta. Digite sua pergunta e pressione Enter.')
-    print('Comandos: /importar CAMINHO, /bases, /nova, /conversas, /abrir ID, /repetir, /sair\n')
+    print('Comandos: /documento CAMINHO, /documentos, /importar CAMINHO, /bases, /nova, /conversas, /abrir ID, /repetir, /sair\n')
     while True:
         try:
             question = input('Voce: ').strip()
@@ -228,6 +228,43 @@ def conversar_terminal(client):
                     print(base['id'], '-', base['nome'], ativa)
                 if not bases: print('Nenhuma base economica enviada neste usuario.')
                 continue
+            if question == '/documentos':
+                response = client.get('/documentos')
+                response.raise_for_status()
+                docs = response.json()
+                for doc in docs:
+                    status = f" ({len(doc.get('paginas', []))} paginas, {doc.get('status')})"
+                    print(doc['id'], '-', doc['nome'], status)
+                if not docs: print('Nenhum documento importado neste usuario.')
+                continue
+            if question.startswith('/documento ') or question.startswith('/doc '):
+                prefix = '/documento ' if question.startswith('/documento ') else '/doc '
+                raw_path = question[len(prefix):].strip()
+                if len(raw_path) >= 2 and raw_path[0] == raw_path[-1] and raw_path[0] in ('"', "'"):
+                    raw_path = raw_path[1:-1]
+                source = Path(raw_path).expanduser()
+                if not source.is_file():
+                    print('Arquivo nao encontrado. Informe o caminho entre aspas se houver espacos.'); continue
+                if source.suffix.lower() != '.pdf':
+                    print('Formato nao aceito para documento. Use um arquivo PDF.'); continue
+                with source.open('rb') as handle:
+                    response = client.post('/documentos', files={'arquivo': (source.name, handle, 'application/octet-stream')})
+                if not response.is_success:
+                    try: detail = response.json().get('detail', 'Falha ao enviar documento.')
+                    except ValueError: detail = 'Falha ao enviar documento.'
+                    print('Nao foi possivel enviar o documento:', detail); continue
+                doc_data = response.json()
+                doc_id = doc_data['id']
+                import_res = client.post(f'/documentos/{doc_id}/importar')
+                if not import_res.is_success:
+                    try: detail = import_res.json().get('detail', 'Falha ao processar documento.')
+                    except ValueError: detail = 'Falha ao processar documento.'
+                    print('Falha ao processar documento:', detail); continue
+                res_data = import_res.json()
+                pags = len(res_data.get('paginas', []))
+                print(f"Documento processado: {res_data['nome']} ({pags} paginas).")
+                print('O conteudo textual foi dividido em chunks e esta disponivel para perguntas no chat.')
+                continue
             if question.startswith('/importar '):
                 raw_path = question[len('/importar '):].strip()
                 if len(raw_path) >= 2 and raw_path[0] == raw_path[-1] and raw_path[0] in ('"', "'"):
@@ -237,14 +274,38 @@ def conversar_terminal(client):
                     print('Arquivo nao encontrado. Informe o caminho entre aspas se houver espacos.'); continue
                 if source.suffix.lower() not in {'.csv', '.xlsx', '.pdf'}:
                     print('Formato nao aceito. Use um arquivo CSV, XLSX ou PDF.'); continue
+                
+                # Para PDFs, tambem indexa no modulo de documentos para perguntas textuais
+                doc_indexed = False
+                if source.suffix.lower() == '.pdf':
+                    try:
+                        with source.open('rb') as handle:
+                            d_resp = client.post('/documentos', files={'arquivo': (source.name, handle, 'application/octet-stream')})
+                        if d_resp.is_success:
+                            d_id = d_resp.json().get('id')
+                            if d_id:
+                                imp_resp = client.post(f'/documentos/{d_id}/importar')
+                                if imp_resp.is_success:
+                                    doc_indexed = True
+                    except Exception:
+                        pass
+
                 with source.open('rb') as handle:
                     response = client.post('/dados', files={'arquivo': (source.name, handle, 'application/octet-stream')})
                 if not response.is_success:
+                    if doc_indexed:
+                        print(f"Documento recebido e indexado para o chat: {source.name}.")
+                        print('O texto do PDF foi fragmentado e esta disponivel para perguntas no chat.')
+                        continue
                     try: detail = response.json().get('detail', 'Falha ao importar a base.')
                     except ValueError: detail = 'Falha ao importar a base.'
                     print('Nao foi possivel importar:', detail); continue
                 data = response.json()
-                print(f"Base recebida: {data['nome']} ({data['linhas']} linhas, {len(data['colunas'])} colunas).")
+                linhas = data.get('linhas', 0)
+                colunas = len(data.get('colunas', []))
+                print(f"Base recebida: {data['nome']} ({linhas} linhas, {colunas} colunas).")
+                if doc_indexed:
+                    print("Texto do documento tambem indexado via PyMuPDF para consultas detalhadas no chat.")
                 print('A base mais recente deste usuario sera usada nas analises. Os arquivos ficam neste computador.')
                 continue
             if question.startswith('/abrir '):
