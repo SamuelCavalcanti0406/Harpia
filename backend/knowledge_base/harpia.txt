@@ -1,5 +1,5 @@
-A HarpIA é uma inteligência artificial brasileira local.
-Seu backend utiliza Python e FastAPI.
-O banco de dados utilizado para conversas é SQLite.
-O modelo de linguagem é executado pelo Ollama.
-A base da linguagem é o Mistral AI, uma LLM francesa
+A HarpIA é uma inteligência artificial brasileira, local e de código aberto, criada por Samuel Coronel.
+O nome vem da harpia, ave de rapina que vive em grande parte do território brasileiro e representa a força do povo brasileiro; a grafia junta "Har" com "IA", de Inteligência Artificial.
+Ela roda no próprio computador do usuário: o modelo de linguagem é executado pelo Ollama, sobre o Ministral, um modelo da empresa francesa Mistral AI.
+O backend usa Python e FastAPI, e as conversas ficam guardadas em um banco SQLite local.
+A HarpIA conversa em português do Brasil, explica temas como economia, história, ciências e tecnologia, lê documentos PDF importados, analisa planilhas de dados econômicos e, quando a pergunta depende de informação atual, pesquisa na internet.

@@ -16,7 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from dotenv import load_dotenv
 
 from auth import usuario_atual
-from context import montar_contexto, NUM_CTX, REFERENCIAS_MARCADOR, RESPONSE_TOKENS, INPUT_BUDGET
+from context import (INPUT_BUDGET, MAX_DOCUMENTS, NUM_CTX, REFERENCIAS_MARCADOR, RESPONSE_TOKENS,
+                     formatar_referencias, montar_contexto)
 from document_processing import (
     DocumentProcessingError,
     documentos_contexto,
@@ -26,20 +27,32 @@ from document_processing import (
     registrar_upload,
 )
 from economic_analysis import EconomicDataError, documentos_analise, listar_bases, salvar_upload
-from knowledge import pesquisar, assunto_anterior
+from knowledge import assunto_anterior, perfil_harpia, pesquisar, sincronizar_base
+from roteador import Intencao, classificar, consulta_ao_indice
 from storage import get_conn, init_db
-from web_search import pesquisar_web, precisa_pesquisa
 
 
 load_dotenv(Path(__file__).resolve().parent / '.env')
 
 logger=logging.getLogger('harpia')
 MODEL_NAME=os.getenv('HARPIA_MODEL','harpia')
-LEASE_SECONDS=180
+FIRST_TOKEN_SECONDS=float(os.getenv('HARPIA_FIRST_TOKEN_SECONDS','180'))
+GENERATION_SECONDS=float(os.getenv('HARPIA_GENERATION_SECONDS','480'))
+LEASE_SECONDS=GENERATION_SECONDS+60
+KEEP_ALIVE=os.getenv('HARPIA_KEEP_ALIVE','30m')
+AVISO_OFFLINE=('Funciono offline, sem acesso à internet, e não encontrei nos meus arquivos locais nada sobre isso. '
+               'Por isso não consigo confirmar notícias, cotações ou acontecimentos recentes. '
+               'Se você tiver um documento sobre o assunto, importe-o com /importar e pergunte de novo; '
+               'se quiser, também posso explicar o tema de forma geral.')
 
 @asynccontextmanager
 async def lifespan(app):
     init_db()
+    try:
+        # Indexa só o que mudou desde a última execução; normalmente leva milissegundos.
+        logger.info('Índice da base: %s',sincronizar_base())
+    except Exception as exc:
+        logger.warning('Indexação inicial falhou: %s',type(exc).__name__)
     yield
 
 app=FastAPI(title='HarpIA',version='0.2.0',lifespan=lifespan,docs_url=None,redoc_url=None,openapi_url=None)
@@ -132,14 +145,31 @@ def obter_conversa(conversa_id: str,usuario: str=Depends(usuario_atual)):
             del attempt['expira_em']
     return {'conversa':dict(row),'mensagens':messages,'tentativas':attempts}
 
+def fechar_frase(texto):
+    """Quando o limite de tokens corta a resposta, termina na última frase completa."""
+    corte=max(texto.rfind(p) for p in ('. ','! ','? ','.\n','!\n','?\n'))
+    return texto[:corte+1] if corte>len(texto)//2 else texto.rstrip()+'…'
+
 def gerar(messages):
-    # Explicit connection/read/write timeouts. A DB lease also fences late results.
-    client=Client(host=os.getenv('OLLAMA_HOST','http://127.0.0.1:11434'),timeout=httpx.Timeout(120.0,connect=5.0))
+    # Streaming: o timeout de leitura vale por pedaço recebido, não pela resposta inteira,
+    # então CPUs lentas não estouram o limite no meio da geração. O prazo total fica abaixo
+    # do lease no banco, que continua barrando resultados atrasados.
+    client=Client(host=os.getenv('OLLAMA_HOST','http://127.0.0.1:11434'),
+                  timeout=httpx.Timeout(FIRST_TOKEN_SECONDS,connect=5.0))
+    prazo=time.monotonic()+GENERATION_SECONDS
+    partes=[]; motivo=None
     try:
-        return client.chat(model=MODEL_NAME,messages=messages,stream=False,
-                           options={'num_ctx':NUM_CTX,'num_predict':RESPONSE_TOKENS}).message.content
+        # keep_alive evita recarregar o modelo do disco entre perguntas espaçadas.
+        for chunk in client.chat(model=MODEL_NAME,messages=messages,stream=True,keep_alive=KEEP_ALIVE,
+                                 options={'num_ctx':NUM_CTX,'num_predict':RESPONSE_TOKENS}):
+            partes.append(chunk.message.content or '')
+            motivo=getattr(chunk,'done_reason',None) or motivo
+            if time.monotonic()>prazo:
+                raise httpx.ReadTimeout('Prazo total de geração excedido.')
     finally:
         client._client.close()
+    texto=''.join(partes)
+    return fechar_frase(texto) if motivo=='length' and texto.strip() else texto
 
 def registrar_contexto(requisicao_id, dados):
     logger.info(
@@ -189,49 +219,35 @@ def conversar(entrada: EntradaChat,usuario: str=Depends(usuario_atual)):
         rows=list(reversed(conn.execute('SELECT papel,conteudo FROM mensagens WHERE conversa_id=? ORDER BY id DESC LIMIT 100',(cid,)).fetchall()))
     try:
         previous=assunto_anterior(rows)
-        busca_atual=precisa_pesquisa(entrada.mensagem)
-        web_docs=[]
-        if busca_atual:
-            query_web=entrada.mensagem
-            if previous and any(t in entrada.mensagem.lower() for t in ('isso','isto','suas','seus','deles','delas','disso','nesse','nessa')):
-                query_web=previous+' '+entrada.mensagem
-            web_docs,web_error=pesquisar_web(query_web,limite=3)
-            if not web_docs:
-                text=('Não consegui verificar essa informação atual. '+web_error+
-                      ' Configure ou tente novamente a pesquisa na internet antes de confiar em um valor ou acontecimento recente.')
-                sources=[]
-            else:
-                # Perguntas atuais usam somente evidências recentes da web. Documentos
-                # locais ficam de fora; do histórico entram só os últimos turnos.
-                docs=web_docs
-                messages,sources,usage=montar_contexto(entrada.mensagem,rows,docs,
-                                                       pesquisa_atual=True,incluir_diagnostico=True,
-                                                       historico_total=history_total)
-                registrar_contexto(rid,usage)
-                if not any(fonte.get('tipo')=='web' for fonte in sources):
-                    text='Não consegui incluir fontes atuais no contexto da resposta. Tente novamente com uma pergunta mais curta.'
-                    sources=[]
-                else:
-                    text=gerar(messages)
+        intencao=classificar(entrada.mensagem)
+        if intencao==Intencao.IDENTIDADE:
+            # A ficha da HarpIA vem do arquivo; o índice não é consultado.
+            docs=perfil_harpia()
+        elif not consulta_ao_indice(intencao):
+            docs=[]
         else:
+            # Camadas em ordem de prioridade. Cada camada tem sua própria medida de relevância,
+            # por isso elas não são mescladas por pontuação.
             docs=documentos_analise(usuario,entrada.mensagem)
             if not docs:
-                docs=documentos_contexto(usuario,entrada.mensagem,limite=3)
+                docs=documentos_contexto(usuario,entrada.mensagem,limite=MAX_DOCUMENTS)
             if not docs:
-                docs=pesquisar(entrada.mensagem,limite=3,anterior=previous)
+                docs=pesquisar(entrada.mensagem,limite=MAX_DOCUMENTS,anterior=previous)
+        logger.info('Roteamento requisicao=%s intencao=%s fontes=%d',rid,intencao.value,len(docs))
+        if intencao==Intencao.ATUALIDADE and not docs:
+            # Offline não há como verificar fatos recentes; responder de memória seria inventar.
+            text,sources=AVISO_OFFLINE,[]
+        else:
             messages,sources,usage=montar_contexto(entrada.mensagem,rows,docs,
+                                                   sem_fontes=consulta_ao_indice(intencao) and not docs,
                                                    incluir_diagnostico=True,
                                                    historico_total=history_total)
             registrar_contexto(rid,usage)
             text=gerar(messages)
         if not isinstance(text,str) or not text.strip(): raise ValueError('Resposta vazia')
-        # Renderiza links apenas das fontes web que realmente couberam no contexto.
-        usados=[fonte for fonte in sources if fonte.get('tipo')=='web']
-        if usados:
-            referencias='\n'.join('- ['+fonte['titulo']+']('+fonte['url']+')'+
-                                   (f" (publicado em {fonte['data_publicacao']})" if fonte.get('data_publicacao') else '')
-                                   for fonte in usados)
-            text=text.rstrip()+REFERENCIAS_MARCADOR+referencias
+        # Lista apenas as fontes que realmente couberam no contexto, na mesma numeração do prompt.
+        if any(fonte.get('tipo')!='perfil' for fonte in sources):
+            text=text.rstrip()+REFERENCIAS_MARCADOR+formatar_referencias(sources)
     except Exception as exc:
         logger.warning('Geração falhou: tipo=%s requisicao=%s',type(exc).__name__,rid)
         timeout=isinstance(exc,httpx.TimeoutException)

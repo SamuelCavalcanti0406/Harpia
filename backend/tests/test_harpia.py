@@ -1,3 +1,4 @@
+import _isolamento  # noqa: F401  (índice FTS5 temporário; precisa vir antes dos módulos da HarpIA)
 import time
 import uuid
 import sqlite3
@@ -13,7 +14,6 @@ import context
 import knowledge
 import main
 import storage
-import web_search
 
 class HarpiaTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -75,7 +75,7 @@ class HarpiaTests(unittest.IsolatedAsyncioTestCase):
         for msg in ['  ','x'*20000,'á'*5000]:self.assertEqual((await self.ask(self.ta,mensagem=msg)).status_code,422)
         with storage.get_conn() as c:self.assertEqual(c.execute('SELECT count(*) FROM conversas').fetchone()[0],0)
     async def test_long_prompt_rejected_without_truncation_or_database_write(self):
-        response=await self.ask(self.ta,mensagem='pergunta '*400)
+        response=await self.ask(self.ta,mensagem='pergunta '*800)
         self.assertEqual(response.status_code,422,response.text)
         self.assertIn('Divida a pergunta',response.text)
         with storage.get_conn() as conn:
@@ -259,7 +259,7 @@ class ContextIntegrationTests(unittest.TestCase):
             self.assertIsNotNone(conn.execute("SELECT 1 FROM mensagens WHERE conteudo LIKE 'Pergunta histórica 0:%'").fetchone())
 
     def test_oversized_question_is_rejected_before_persistence(self):
-        request=main.EntradaChat(mensagem='pergunta '*400,conversa_id=self.cid)
+        request=main.EntradaChat(mensagem='pergunta '*800,conversa_id=self.cid)
         with self.assertRaises(main.HTTPException) as raised:
             main.conversar(request,self.uid)
         self.assertEqual(getattr(raised.exception,'status_code',None),422)
@@ -268,77 +268,67 @@ class ContextIntegrationTests(unittest.TestCase):
 
     def test_ollama_gets_context_and_output_reservations(self):
         captured={}
-        class FakeResult:
-            class message:
-                content='ok'
+        class Chunk:
+            def __init__(self,content,done_reason=None):
+                self.message=type('M',(),{'content':content})();self.done_reason=done_reason
         class FakeClient:
             def __init__(self,**kwargs): self._client=self
-            def chat(self,**kwargs): captured.update(kwargs); return FakeResult()
+            def chat(self,**kwargs): captured.update(kwargs); return iter([Chunk('o'),Chunk('k',done_reason='stop')])
             def close(self): pass
         with patch('main.Client',FakeClient):
             self.assertEqual(main.gerar([{'role':'user','content':'oi'}]),'ok')
+        self.assertTrue(captured['stream'])
         self.assertEqual(captured['options']['num_ctx'],context.CONTEXT_MAX_TOKENS)
         self.assertEqual(captured['options']['num_predict'],context.RESPONSE_TOKENS)
 
-class WebSearchFreshnessTests(unittest.TestCase):
-    class TavilyResponse:
-        status_code=200
-        def __init__(self,results): self.results=results
-        def raise_for_status(self): pass
-        def json(self): return {'results':self.results}
+    def test_truncated_answer_ends_on_complete_sentence(self):
+        self.assertEqual(main.fechar_frase('Primeira frase completa. Segunda frase também. Terceira cort'),
+                         'Primeira frase completa. Segunda frase também.')
 
-    def results(self):
-        from datetime import date, timedelta
-        return [
-            {'title':'Notícia atual','url':'https://example.com/current','content':'Informação recente.',
-             'published_date':date.today().isoformat()},
-            {'title':'Matéria antiga','url':'https://example.com/old','content':'Arquivo de 2024.',
-             'published_date':'2024-05-10'},
-            {'title':'Sem data','url':'https://example.com/undated','content':'Data indisponível.',
-             'published_date':None},
-            {'title':'Semana passada','url':'https://example.com/recent','content':'Ainda recente.',
-             'published_date':(date.today()-timedelta(days=3)).isoformat()},
-        ]
+class OfflineChatTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(dir=Path(__file__).parent)
+        self.db_patch=patch.object(storage,'DB_PATH',Path(self.tmp.name)/'offline.db')
+        self.db_patch.start();storage.init_db()
+        self.uid,_=auth.criar_usuario('Offline')
 
-    def test_today_news_filters_old_and_undated_results(self):
-        captured={}
-        def request(url,**kwargs):
-            captured.update(kwargs['json'])
-            return self.TavilyResponse(self.results())
-        with patch.dict('os.environ',{'TAVILY_API_KEY':'test-key'}), patch('web_search.httpx.post',side_effect=request):
-            sources,error=web_search.pesquisar_web('Quais são as notícias de hoje no Brasil?')
-        self.assertIsNone(error)
-        self.assertEqual([source['titulo'] for source in sources],['Notícia atual'])
-        self.assertEqual(captured['time_range'],'day')
-        self.assertTrue(captured['filter_by_published_date'])
+    def tearDown(self):
+        self.db_patch.stop();self.tmp.cleanup()
 
-    def test_general_news_search_defaults_to_recent_week(self):
-        captured={}
-        def request(url,**kwargs):
-            captured.update(kwargs['json'])
-            return self.TavilyResponse(self.results())
-        with patch.dict('os.environ',{'TAVILY_API_KEY':'test-key'}), patch('web_search.httpx.post',side_effect=request):
-            sources,error=web_search.pesquisar_web('Notícias sobre o Brasil')
-        self.assertIsNone(error)
-        self.assertEqual(captured['time_range'],'week')
-        self.assertTrue(captured['filter_by_published_date'])
-        self.assertNotIn('Matéria antiga',[source['titulo'] for source in sources])
-        self.assertNotIn('Sem data',[source['titulo'] for source in sources])
-        self.assertIn('Semana passada',[source['titulo'] for source in sources])
+    def test_identity_question_uses_profile_without_touching_the_index(self):
+        with patch('main.pesquisar') as base, patch('main.documentos_contexto') as docs, \
+             patch('main.gerar',return_value='Sou a HarpIA.') as generate:
+            response=main.conversar(main.EntradaChat(mensagem='me fale quem é você.'),self.uid)
+        base.assert_not_called();docs.assert_not_called()
+        self.assertEqual(response['resposta'],'Sou a HarpIA.')
+        self.assertEqual({fonte['fonte'] for fonte in response['fontes']},{'harpia.txt'})
+        self.assertIn('Samuel Coronel',generate.call_args.args[0][0]['content'])
 
-    def test_unqualified_news_question_triggers_web_search(self):
-        self.assertTrue(web_search.precisa_pesquisa('Quais são as notícias do Brasil?'))
+    def test_casual_message_skips_search(self):
+        with patch('main.pesquisar') as base, patch('main.documentos_contexto') as docs, \
+             patch('main.documentos_analise') as analise, patch('main.gerar',return_value='Oi! Tudo ótimo.'):
+            response=main.conversar(main.EntradaChat(mensagem='Olá, tudo bem?'),self.uid)
+        base.assert_not_called();docs.assert_not_called();analise.assert_not_called()
+        self.assertEqual(response['fontes'],[])
+        self.assertNotIn('Fontes consultadas',response['resposta'])
 
-    def test_explicit_historical_year_is_not_filtered_as_current_news(self):
-        captured={}
-        def request(url,**kwargs):
-            captured.update(kwargs['json'])
-            return self.TavilyResponse(self.results())
-        with patch.dict('os.environ',{'TAVILY_API_KEY':'test-key'}), patch('web_search.httpx.post',side_effect=request):
-            sources,error=web_search.pesquisar_web('Notícias do Brasil em 2024')
-        self.assertIsNone(error)
-        self.assertNotIn('time_range',captured)
-        self.assertIn('Matéria antiga',[source['titulo'] for source in sources])
+    def test_knowledge_answer_lists_local_sources(self):
+        with patch('main.gerar',return_value='É o aumento geral dos preços (Fonte 1).') as generate:
+            response=main.conversar(main.EntradaChat(mensagem='O que é inflação?'),self.uid)
+        self.assertTrue(response['fontes'])
+        self.assertIn('Fontes consultadas:\n- Fonte 1: economia/02_macroeconomia/inflacao.txt',response['resposta'])
+        self.assertIn('[Fonte 1 — economia/02_macroeconomia/inflacao.txt',generate.call_args.args[0][-2]['content'])
+
+    def test_current_events_without_local_sources_answer_offline_without_model(self):
+        with patch('main.gerar') as generate:
+            response=main.conversar(main.EntradaChat(mensagem='Quais são as notícias de hoje?'),self.uid)
+        generate.assert_not_called()
+        self.assertEqual(response['resposta'],main.AVISO_OFFLINE)
+
+    def test_question_without_sources_tells_the_model_to_say_so(self):
+        with patch('main.gerar',return_value='Não encontrei fontes locais sobre isso.') as generate:
+            main.conversar(main.EntradaChat(mensagem='Como funciona a fotossíntese?'),self.uid)
+        self.assertIn('não encontrou fontes',generate.call_args.args[0][0]['content'])
 
 class PromptNaturalnessTests(unittest.TestCase):
     def test_system_prompt_carries_identity_and_today(self):
@@ -348,25 +338,18 @@ class PromptNaturalnessTests(unittest.TestCase):
         self.assertIn(context.data_extenso(),system)
         self.assertEqual(context.data_extenso(context.date(2026,3,5)),'5 de março de 2026')
 
-    def test_sources_are_sent_as_plain_text_not_json(self):
-        docs=[{'tipo':'web','titulo':'Selic mantida','url':'https://www.exemplo.com.br/selic',
-               'conteudo':'O Copom manteve a taxa.','data_publicacao':'2026-10-24'}]
-        messages,sources=context.montar_contexto('Como está a Selic hoje?',[],docs,pesquisa_atual=True)
+    def test_sources_are_sent_as_numbered_plain_text(self):
+        docs=[{'tipo':'documento','fonte':'relatorio.pdf','trecho':'página 2','conteudo':'A receita cresceu 8%.'}]
+        messages,sources=context.montar_contexto('Quanto a receita cresceu?',[],docs)
         evidence=messages[-2]['content']
-        self.assertIn('[Fonte 1 — Selic mantida (exemplo.com.br), publicado em 2026-10-24]',evidence)
-        self.assertIn('O Copom manteve a taxa.',evidence)
+        self.assertIn('[Fonte 1 — relatorio.pdf, página 2]\nA receita cresceu 8%.',evidence)
         self.assertNotIn('{"',evidence)
+        self.assertEqual(context.formatar_referencias(sources),'- Fonte 1: relatorio.pdf, página 2')
 
-    def test_web_search_keeps_only_recent_turns_without_reference_links(self):
-        rows=[]
-        for index in range(5):
-            rows.extend([{'papel':'user','conteudo':f'pergunta {index}'},
-                         {'papel':'assistant','conteudo':f'resposta {index}'+context.REFERENCIAS_MARCADOR+'- [x](https://x.com)'}])
-        docs=[{'tipo':'web','titulo':'T','url':'https://x.com','conteudo':'fato atual'}]
-        messages,_=context.montar_contexto('e hoje?',rows,docs,pesquisa_atual=True)
-        contents=[m['content'] for m in messages]
-        self.assertEqual([c for c in contents if c.startswith(('pergunta','resposta'))],
-                         ['pergunta 3','resposta 3','pergunta 4','resposta 4'])
+    def test_history_drops_appended_reference_lists(self):
+        rows=[{'papel':'user','conteudo':'pergunta 1'},
+              {'papel':'assistant','conteudo':'resposta 1'+context.REFERENCIAS_MARCADOR+'- Fonte 1: x.txt'}]
+        messages,_=context.montar_contexto('pergunta 2',rows,[])
+        self.assertIn({'role':'assistant','content':'resposta 1'},messages)
 
 if __name__=='__main__':unittest.main()
-

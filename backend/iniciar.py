@@ -366,7 +366,10 @@ def executar():
                 raise RuntimeError('O backend nao iniciou. Confira as mensagens acima.')
             time.sleep(0.1)
         with httpx.Client(base_url=url, headers={'Authorization': 'Bearer ' + token},
-                          timeout=150, trust_env=False) as client:
+                          # Leitura longa: em CPU a geração pode levar minutos, e o backend
+                          # só responde no fim. O próprio backend limita o tempo total.
+                          timeout=httpx.Timeout(connect=5, read=600, write=30, pool=5),
+                          trust_env=False) as client:
             response = client.get('/')
             response.raise_for_status()
             print('Backend protegido disponivel em', url)

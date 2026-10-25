@@ -6,17 +6,18 @@ O inicializador prepara o ambiente Python quando necessário, instala as depend�
 
 Não há interface gráfica/web no projeto atual. A janela aberta é o chat: escreva uma pergunta e pressione Enter.
 
-Para ativar pesquisa na internet, copie `backend/.env.example` para `backend/.env` e coloque sua chave Tavily depois de `TAVILY_API_KEY=`. Guarde esse arquivo e não compartilhe; ele está excluído do Git. Na próxima inicialização, perguntas atuais usam até três fontes e mostram os links consultados. Sem chave ou sem fontes disponíveis, a HarpIA informa que não conseguiu verificar a informação atual.
+A HarpIA funciona offline. Ela responde com a base de conhecimento em `backend/knowledge_base/` e com os PDFs que você importar, buscando em um índice local (`.local/conhecimento.db`). Quando não encontra fontes, ela avisa.
 
 Experimente no chat:
 
-- `O que é inflação?` — pergunta conceitual, sem pesquisa web.
-- `Qual é a cotação atual do dólar?` — deve consultar a web e mostrar as fontes.
-- `Quais são as principais notícias de hoje no Brasil?` — pesquisa notícias recentes.
+- `Olá, tudo bem?` — conversa casual, sem busca.
+- `Quem é você?` — a HarpIA se apresenta pela própria ficha, sem busca.
+- `O que é inflação?` — busca na base local e lista as fontes no fim da resposta.
+- `Quais são as notícias de hoje?` — sem internet, ela avisa que não pode confirmar fatos recentes.
 
 Para analisar os dados de um estabelecimento, envie uma planilha CSV, Excel ou arquivo PDF com dados tabulares no chat com `/importar "C:\\caminho\\da\\base.xlsx"` (ou `"base.pdf"`). Depois pergunte sobre faturamento, custos, despesas, lucro ou tendências. Use `/bases` para ver os arquivos enviados. As bases ficam localmente em `.local` e são separadas por usuário.
 
-Confirme a pesquisa procurando `Fontes consultadas` e os links no fim da resposta. A documentação Swagger em `/docs` permanece desativada; a API exige credencial, e o chat local já usa essa autenticação com segurança.
+As fontes usadas aparecem em `Fontes consultadas`, no fim da resposta, com o arquivo e o trecho ou página. A documentação Swagger em `/docs` permanece desativada; a API exige credencial, e o chat local já usa essa autenticação com segurança.
 
 - `/nova`: começa outra conversa.
 - `/conversas`: mostra as conversas do seu usuário.

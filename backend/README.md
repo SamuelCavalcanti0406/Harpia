@@ -87,17 +87,36 @@ A resposta preserva `conversa_id` e `resposta`, adicionando `requisicao_id`, `es
 
 A mesma requisição concluída devolve o resultado salvo, sem gerar novamente. Reutilizar o UUID com conteúdo diferente retorna 409. Chaves são isoladas por usuário. Falhas de recuperação/modelo retornam 502; timeout retorna 504; o corpo `detail` identifica a tentativa. Histórico recebe pergunta e resposta juntas, somente no sucesso. Tentativas falhas permanecem registradas para consulta/repetição.
 
-Somente uma geração pode ficar pendente por conversa. Outra recebe 409. Uma reserva de 180 segundos impede bloqueio permanente após encerramento do processo; resultados atrasados não podem gravar sobre uma reserva substituída. Repetir uma tentativa antiga após novos turnos usa o histórico atual. Timeouts do cliente Ollama: conexão 5 segundos e operações 120 segundos. A reserva não cancela fisicamente a geração no servidor Ollama.
+Somente uma geração pode ficar pendente por conversa. Outra recebe 409. Uma reserva (geração máxima + 60 s) impede bloqueio permanente após encerramento do processo; resultados atrasados não podem gravar sobre uma reserva substituída. Repetir uma tentativa antiga após novos turnos usa o histórico atual. A geração usa streaming: o limite de 180 s vale entre pedaços da resposta, e o total é limitado a 480 s (`HARPIA_GENERATION_SECONDS`). A reserva não cancela fisicamente a geração no servidor Ollama.
 
-## Busca e contexto
+## Motor de busca local
 
-Busca lexical com BM25, peso de título, cobertura mínima de 65% dos termos e diversidade de fontes. Os documentos são indexados em cache; mudança de tamanho/data ou remoção invalida o índice. Há uma reformulação explícita para perguntas sobre preços ficando mais caros e recuperação do assunto anterior em continuações com pronomes. Isso não é busca semântica geral; paráfrases não previstas ainda podem falhar. Falhas de leitura são sinalizadas, sem fingir que a base completa foi consultada.
+A HarpIA não usa APIs externas de busca. A recuperação é feita por quatro módulos:
 
-O orçamento usa uma estimativa conservadora de tokens por bytes UTF-8, não o tokenizer exato do modelo; a margem reduz, mas não elimina, o risco de divergência. O padrão é 2.048 tokens de contexto, 512 reservados à resposta e 128 de margem, deixando até 1.408 para o prompt. O sistema e a pergunta atual têm prioridade; turnos recentes completos e até três trechos de documentos entram apenas se couberem. Trechos são limitados a 700 caracteres. Perguntas que não cabem recebem 422 sem criar conversa. Mensagens omitidas continuam no SQLite. Logs registram estimativas e quantidades, nunca o conteúdo das mensagens.
+| Módulo | Papel |
+|---|---|
+| `roteador.py` | Classifica a pergunta por regras determinísticas: `identidade`, `casual`, `atualidade` ou `conhecimento`. Identidade e casual **não consultam o índice**. |
+| `conectores.py` | Interface `Conector` (fontes + trechos sob demanda). `ConectorTexto` lê `.txt`/`.md`; `ConectorPDF` lê PDFs página por página com PyMuPDF. Ambos dividem o texto em janelas fixas de 1000 caracteres com sobreposição de 100 antes de gravar. |
+| `indice.py` | Índice persistente SQLite FTS5 em `.local/conhecimento.db` (arquivo separado do banco de conversas). Guarda a origem de cada trecho (arquivo, ordem, página). Fontes com a mesma assinatura (mtime+tamanho; SHA-256 nos PDFs) não são reindexadas; fontes removidas saem do índice. |
+| `busca.py` | Normaliza (minúsculas, sem acentos), remove stopwords, busca por prefixo do radical (`inflação`/`inflações`) e ranqueia **só pelo BM25** do FTS5. A cobertura mínima dos termos funciona como filtro, nunca é somada ao BM25. Deduplica trechos e limita a 1 por arquivo da base (2 por PDF). |
+
+Ordem de recuperação no `/chat`: análise econômica das planilhas do usuário → PDFs importados (ativos) → base de conhecimento. As camadas não são misturadas por pontuação. Cada resposta recebe no máximo 3 trechos (até 5 com `HARPIA_MAX_TRECHOS`), e o orçamento de contexto ainda descarta o que não couber. Sem fontes, o modelo é instruído a dizer que não encontrou nada localmente; perguntas de atualidade sem fonte recebem um aviso de modo offline, sem chamar o modelo.
+
+As fontes enviadas ao modelo são numeradas (`[Fonte 1 — arquivo, trecho]`). O prompt pede que ele cite os números, e o backend anexa `Fontes consultadas` com a mesma numeração. A resposta JSON traz `fontes` com `id`, `fonte`, `trecho`, `conteudo` e `relevancia`.
+
+Memória: os trechos são gerados um a um e gravados em lotes de 200; nenhuma coleção é carregada inteira na RAM. Documentos importados por versões anteriores (catálogo JSON) são reindexados automaticamente na primeira consulta.
+
+Isso é busca lexical: sinônimos e paráfrases sem palavras em comum ainda podem falhar.
+
+## Contexto
+
+O orçamento usa uma estimativa conservadora de tokens por bytes UTF-8, não o tokenizer exato do modelo; a margem reduz, mas não elimina, o risco de divergência. O padrão é 4.096 tokens de contexto, 512 reservados à resposta e 128 de margem. O sistema e a pergunta atual têm prioridade; turnos recentes completos (até 40% do espaço) e os trechos entram apenas se couberem. Trechos são limitados a 900 caracteres. Perguntas que não cabem recebem 422 sem criar conversa. Mensagens omitidas continuam no SQLite. Logs registram estimativas e quantidades, nunca o conteúdo das mensagens.
 
 ## Configuração
 
-- Pesquisa web opcional: instale as dependências atualizadas, copie `.env.example` para `.env` nesta pasta e preencha `TAVILY_API_KEY`. O `.env` é ignorado pelo Git. Sem chave, perguntas conceituais continuam usando o modelo e os documentos locais; perguntas atuais recebem um aviso explícito de que não puderam ser verificadas.
+- A HarpIA funciona offline; nenhuma chave de API é necessária. `.env.example` lista as opções.
+- `HARPIA_INDEX_PATH`: índice FTS5; padrão `.local/conhecimento.db`.
+- `HARPIA_MAX_TRECHOS`: trechos por resposta, de 3 a 5; padrão 3.
 - `HARPIA_DB_PATH`: caminho do SQLite; padrão ao lado de `storage.py`.
 - `HARPIA_MODEL`: padrão `harpia`.
 - `OLLAMA_HOST`: padrão `http://127.0.0.1:11434`. Defina apenas servidores confiáveis.
@@ -106,16 +125,14 @@ O orçamento usa uma estimativa conservadora de tokens por bytes UTF-8, não o t
 - `HARPIA_CONTEXT_MARGIN`: margem para formatação e erro da estimativa; padrão 128.
 - `HARPIA_CORS_ORIGINS`: origens exatas separadas por vírgula; vazio por padrão; `*` recusado.
 
-O `/chat` pesquisa no Tavily quando a pergunta indica que precisa de informação atual ou pede pesquisa na internet. A consulta retorna no máximo três fontes com título, URL, trecho e data de publicação quando disponível. Datas de publicação identificam a publicação, não necessariamente quando o acontecimento ocorreu. Se a consulta falhar ou não encontrar fontes, a HarpIA não usa o modelo para adivinhar uma resposta atual. A pesquisa custa créditos da conta Tavily e depende de conexão com a internet.
-
-As respostas incluem a lista de fontes web realmente enviada ao modelo; a resposta JSON também mantém `fontes` para inspeção. Fontes locais continuam sendo recuperadas pela busca BM25. Os textos das páginas são tratados como dados não confiáveis. A documentação interativa Swagger/OpenAPI permanece desativada nesta instalação; faça as chamadas com autenticação Bearer conforme o exemplo da seção API ou use um cliente HTTP compatível.
+Os textos das fontes são tratados como dados não confiáveis. A documentação interativa Swagger/OpenAPI permanece desativada nesta instalação; faça as chamadas com autenticação Bearer conforme o exemplo da seção API ou use um cliente HTTP compatível.
 
 Não há limitação global de taxa por usuário nesta versão. Para implantação compartilhada, acrescente limitação de requisições no proxy e monitore capacidade. Não publique backups ou a pasta do projeto como arquivos estáticos.
 
 ## Verificação
 
 ```powershell
-.\.venv\Scripts\python.exe -m compileall -q main.py auth.py admin.py storage.py context.py knowledge.py tests
+.\.venv\Scripts\python.exe -m compileall -q main.py auth.py admin.py storage.py context.py knowledge.py busca.py indice.py conectores.py roteador.py tests
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 

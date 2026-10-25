@@ -6,14 +6,15 @@
 
 ## Sobre
 
-A HarpIA é uma assistente de inteligência artificial executada localmente com [Ollama](https://ollama.com/) e o modelo [Mistral](https://mistral.ai/). Ela combina conversa, busca em uma base de conhecimento e, opcionalmente, pesquisa na web para perguntas sobre informações atuais.
+A HarpIA é uma assistente de inteligência artificial executada localmente com [Ollama](https://ollama.com/) e o modelo [Mistral](https://mistral.ai/). Ela combina conversa com um motor de busca próprio (SQLite FTS5) sobre a base de conhecimento e os seus PDFs, e funciona totalmente offline.
 
 ## Recursos
 
 - Conversa pelo terminal, sem interface web.
-- Busca em documentos locais para complementar as respostas.
+- Motor de busca local e persistente (SQLite FTS5 + BM25), com as fontes citadas no fim da resposta.
+- Roteador de intenção: conversa casual e perguntas sobre a HarpIA não disparam busca.
 - Conversas privadas por usuário e API protegida por credencial.
-- Pesquisa opcional na web com links das fontes consultadas.
+- Funciona offline: nenhuma API externa ou chave é necessária.
 - Análise local de bases econômicas CSV, Excel e PDF com Pandas e NumPy.
 - Leitura eficiente e fragmentação em chunks de PDFs com PyMuPDF (fitz) otimizada para baixo consumo de memória.
 
@@ -29,7 +30,7 @@ Para analisar dados de um estabelecimento, envie uma planilha CSV, XLSX ou arqui
 
 As bases ficam no computador, separadas por usuário, e não são incluídas no Git. A HarpIA envia somente resumos numéricos ao modelo local para explicar os resultados.
 
-Para ativar a pesquisa na web, copie `backend/.env.example` para `backend/.env` e configure sua chave Tavily. Mantenha essa chave apenas no arquivo `.env`, que não é enviado ao Git.
+Para ampliar o que a HarpIA sabe, coloque arquivos `.txt` ou `.md` em `backend/knowledge_base/` (são indexados na próxima pergunta, apenas os novos ou alterados) ou importe PDFs pelo chat com `/documento` e `/importar`.
 
 ## Documentação
 

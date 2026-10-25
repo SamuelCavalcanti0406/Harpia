@@ -1,3 +1,4 @@
+import _isolamento  # noqa: F401  (índice FTS5 temporário; precisa vir antes dos módulos da HarpIA)
 import io
 from pathlib import Path
 import tempfile

@@ -2,12 +2,11 @@
 
 O módulo utiliza PyMuPDF para extração eficiente de texto página por página,
 otimizado para baixo consumo de memória RAM (gerenciador de contexto with fitz.open()).
-Divide o texto em blocos (chunks) de 1000 caracteres com sobreposição de 100 caracteres,
-prontos para consumo pelo LLM. Mantém os originais, os resultados derivados e o índice
-em diretórios separados por usuário.
+Divide o texto em blocos (chunks) de 1000 caracteres com sobreposição de 100 caracteres e
+os grava no índice FTS5 (indice.py) à medida que são gerados. Mantém os originais e os
+resultados derivados em diretórios separados por usuário.
 """
 from __future__ import annotations
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -16,31 +15,27 @@ from pathlib import Path
 import re
 import unicodedata
 import uuid
-import pandas as pd
 
 try:
     import pymupdf as fitz
 except ImportError:
     import fitz
-    
+
+import busca
+from conectores import ConectorPDF, dividir_em_chunks, paginas_pdf
+import indice
+
 DOCUMENT_ROOT = Path(__file__).resolve().parent.parent / ".local" / "documents"
 MAX_UPLOAD_BYTES = int(os.getenv("HARPIA_DOCUMENT_MAX_BYTES", str(25 * 1024 * 1024)))
 MAX_INDEX_CHUNKS = int(os.getenv("HARPIA_DOCUMENT_MAX_INDEX_CHUNKS", "5000"))
 CHUNK_SIZE_DEFAULT = 1000
 CHUNK_OVERLAP_DEFAULT = 100
 SUPPORTED_EXTENSIONS = {".pdf"}
+COLECAO_DOCUMENTOS = "documentos"
 
 
 class DocumentProcessingError(ValueError):
     """Erro seguro para apresentar ao cliente sem expor caminhos locais."""
-
-
-@dataclass
-class ProcessedDocument:
-    markdown: str
-    tables: list[dict]
-    metadata: dict
-    chunks: list[dict]
 
 
 def _agora() -> str:
@@ -53,14 +48,6 @@ def _normalizar(texto: str) -> str:
         for char in unicodedata.normalize("NFD", str(texto).lower())
         if unicodedata.category(char) != "Mn"
     )
-
-
-def _tokens(texto: str) -> set[str]:
-    return {
-        token
-        for token in re.findall(r"[^\W_]+", _normalizar(texto))
-        if len(token) > 1
-    }
 
 
 def _safe_name(filename: str | None) -> str:
@@ -116,16 +103,6 @@ def _public_record(record: dict) -> dict:
         "secoes": record.get("secoes", []),
         "tabelas": record.get("tabelas", []),
     }
-
-
-def _json_safe(value):
-    if value is None or isinstance(value, (str, int, float, bool)):
-        if isinstance(value, float) and pd.isna(value):
-            return None
-        return value
-    if hasattr(value, "item"):
-        return _json_safe(value.item())
-    return str(value)
 
 
 def registrar_upload(owner_id: str, filename: str | None, stream) -> dict:
@@ -221,51 +198,20 @@ def extrair_chunks_pdf(
     chunk_size: int = CHUNK_SIZE_DEFAULT,
     overlap: int = CHUNK_OVERLAP_DEFAULT,
 ) -> list[str]:
-    """Lê o PDF iterando página por página usando with fitz.open() para poupar memória RAM.
-
-    O texto extraído é imediatamente dividido em chunks de 1000 caracteres, com uma
-    sobreposição (overlap) de 100 caracteres entre eles.
-    Retorna uma lista de strings fragmentadas prontas para o LLM.
-    """
+    """Lê o PDF página por página e divide o texto em janelas de 1000 caracteres com
+    sobreposição de 100. A indexação usa o mesmo gerador sem montar esta lista."""
     path = Path(caminho)
     if not path.is_file():
         raise DocumentProcessingError("O documento original não foi encontrado.")
     if path.stat().st_size == 0:
         raise DocumentProcessingError("O documento está vazio.")
-
-    step = chunk_size - overlap
-    if step <= 0:
+    if chunk_size - overlap <= 0:
         raise ValueError("chunk_size deve ser estritamente maior que overlap.")
-
-    chunks: list[str] = []
-    buffer = ""
-
     try:
-        with fitz.open(str(path)) as doc:
-            for page in doc:
-                texto_pagina = page.get_text() or ""
-                if not texto_pagina:
-                    continue
-                buffer += texto_pagina
-                while len(buffer) >= chunk_size:
-                    chunks.append(buffer[:chunk_size])
-                    buffer = buffer[step:]
-                    if len(chunks) >= MAX_INDEX_CHUNKS:
-                        break
-                if len(chunks) >= MAX_INDEX_CHUNKS:
-                    break
+        return [trecho.conteudo for trecho in dividir_em_chunks(
+            paginas_pdf(path), chunk_size, overlap, limite=MAX_INDEX_CHUNKS)]
     except Exception as exc:
-        if isinstance(exc, DocumentProcessingError):
-            raise
         raise DocumentProcessingError(f"Erro ao ler PDF com PyMuPDF: {exc}") from exc
-
-    if len(chunks) == 0:
-        if buffer.strip():
-            chunks.append(buffer)
-    elif len(buffer) > overlap and buffer.strip():
-        chunks.append(buffer[:chunk_size])
-
-    return chunks
 
 
 # Aliases convenientes para interoperabilidade
@@ -274,9 +220,7 @@ ler_pdf_chunks = extrair_chunks_pdf
 extrair_texto_pdf_chunks = extrair_chunks_pdf
 
 
-def processar_arquivo(path: Path, converter=None) -> ProcessedDocument:
-    """Processa o PDF localmente utilizando PyMuPDF (fitz) página por página."""
-    path = Path(path)
+def _validar_pdf(path: Path) -> None:
     if not path.is_file():
         raise DocumentProcessingError("O documento original não foi encontrado.")
     if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
@@ -286,86 +230,61 @@ def processar_arquivo(path: Path, converter=None) -> ProcessedDocument:
     if path.stat().st_size > MAX_UPLOAD_BYTES:
         raise DocumentProcessingError("O documento excede o limite configurado.")
 
-    raw_chunks = extrair_chunks_pdf(path, chunk_size=CHUNK_SIZE_DEFAULT, overlap=CHUNK_OVERLAP_DEFAULT)
 
-    pages_list = []
-    tables = []
-    markdown_parts = []
-    table_markdown = []
-
+def _extrair_texto_e_tabelas(path: Path, markdown_destino: Path, tabelas_dir: Path) -> tuple[list[int], list[dict]]:
+    """Grava o texto e as tabelas página a página, sem acumular o documento na memória."""
+    paginas: list[int] = []
+    tabelas: list[dict] = []
     try:
-        with fitz.open(str(path)) as doc:
-            table_idx = 1
+        with fitz.open(str(path)) as doc, markdown_destino.open("w", encoding="utf-8") as markdown:
             for page_num, page in enumerate(doc, start=1):
-                pages_list.append(page_num)
-                text = page.get_text() or ""
-                if text.strip():
-                    markdown_parts.append(text.strip())
-
-                # Extrai tabelas caso existam na página
+                paginas.append(page_num)
+                text = (page.get_text() or "").strip()
+                if text:
+                    markdown.write(text + "\n\n")
                 try:
-                    tab_finder = page.find_tables()
-                    for tab in getattr(tab_finder, "tables", []):
-                        df = tab.to_pandas()
-                        if df is not None and not df.empty:
-                            df.columns = [str(c) for c in df.columns]
-                            records = [
-                                {str(k): _json_safe(v) for k, v in row.items()}
-                                for row in df.to_dict(orient="records")
-                            ]
-                            try:
-                                t_md = df.to_markdown(index=False)
-                            except Exception:
-                                t_md = df.to_csv(index=False)
-                            tables.append({
-                                "numero": table_idx,
-                                "linhas": int(df.shape[0]),
-                                "colunas": int(df.shape[1]),
-                                "nomes_colunas": df.columns.tolist(),
-                                "dados": records,
-                                "paginas": [page_num],
-                            })
-                            table_markdown.append(f"Tabela {table_idx}:\n{t_md[:4000]}")
-                            table_idx += 1
+                    finder = page.find_tables()
                 except Exception:
-                    pass
+                    continue
+                for tab in getattr(finder, "tables", []):
+                    try:
+                        df = tab.to_pandas()
+                    except Exception:
+                        continue
+                    if df is None or df.empty:
+                        continue
+                    numero = len(tabelas) + 1
+                    df.columns = [str(c) for c in df.columns]
+                    df.to_csv(tabelas_dir / f"tabela_{numero}.csv", index=False, encoding="utf-8-sig")
+                    tabelas.append({
+                        "numero": numero,
+                        "linhas": int(df.shape[0]),
+                        "colunas": int(df.shape[1]),
+                        "nomes_colunas": df.columns.tolist(),
+                        "paginas": [page_num],
+                    })
+    except DocumentProcessingError:
+        raise
     except Exception as exc:
-        if isinstance(exc, DocumentProcessingError):
-            raise
         raise DocumentProcessingError(f"Falha ao processar o PDF com PyMuPDF: {exc}") from exc
+    return paginas, tabelas
 
-    full_markdown = "\n\n".join(markdown_parts)
 
-    structured_chunks = [
-        {
-            "conteudo": chunk,
-            "pagina": None,
-            "paginas": pages_list,
-            "secao": None,
-            "nivel": None,
-        }
-        for chunk in raw_chunks
-    ]
+def _conector(owner_id: str, records: list[dict]) -> ConectorPDF:
+    owner = _owner_dir(owner_id)
+    docs = [{"id": r["id"], "nome": r["nome"], "sha256": r.get("sha256"),
+             "caminho": owner / r["original_rel"]} for r in records]
+    return ConectorPDF(docs, dono=owner_id, colecao=COLECAO_DOCUMENTOS, limite_trechos=MAX_INDEX_CHUNKS)
 
-    if table_markdown:
-        structured_chunks.extend(
-            {"conteudo": t_md, "pagina": None, "paginas": [], "secao": None, "nivel": None}
-            for t_md in table_markdown
-        )
 
-    metadata = {
-        "paginas": pages_list,
-        "secoes": [],
-        "quantidade_itens_texto": len(raw_chunks),
-        "quantidade_tabelas": len(tables),
-    }
+def _ativos_importados(owner_id: str) -> list[dict]:
+    return [r for r in _read_registry(owner_id) if r.get("ativo", True) and r.get("importado")]
 
-    return ProcessedDocument(
-        markdown=full_markdown,
-        tables=tables,
-        metadata=metadata,
-        chunks=structured_chunks[:MAX_INDEX_CHUNKS],
-    )
+
+def sincronizar_documentos(owner_id: str) -> dict:
+    """Mantém o índice igual aos documentos ativos: indexa importações antigas (catálogo JSON
+    de versões anteriores) e remove versões substituídas. Sem mudanças, custa uma consulta."""
+    return indice.sincronizar(_conector(owner_id, _ativos_importados(owner_id)))
 
 
 def importar_documento(owner_id: str, document_id: str) -> dict:
@@ -373,30 +292,27 @@ def importar_documento(owner_id: str, document_id: str) -> dict:
     owner = _owner_dir(owner_id)
     original = owner / record["original_rel"]
     try:
-        processed = processar_arquivo(original)
+        _validar_pdf(original)
         extracted = owner / "extracted" / f"{document_id}.md"
-        index = owner / "indexes" / f"{document_id}.json"
         tables_dir = owner / "tables" / document_id
         extracted.parent.mkdir(parents=True, exist_ok=True)
-        index.parent.mkdir(parents=True, exist_ok=True)
         tables_dir.mkdir(parents=True, exist_ok=True)
-        extracted.write_text(processed.markdown, encoding="utf-8")
-        table_records = []
-        for table in processed.tables:
-            table_path = tables_dir / f"tabela_{table['numero']}.csv"
-            frame = pd.DataFrame(table["dados"], columns=table["nomes_colunas"])
-            frame.to_csv(table_path, index=False, encoding="utf-8-sig")
-            table_records.append({key: value for key, value in table.items() if key != "dados"})
-        index.write_text(json.dumps({"chunks": processed.chunks}, ensure_ascii=False), encoding="utf-8")
+        paginas, tabelas = _extrair_texto_e_tabelas(original, extracted, tables_dir)
+        resumo = indice.sincronizar(_conector(owner_id, [record]), remover_ausentes=False)
+        if resumo["falhas"]:
+            raise DocumentProcessingError("O texto do PDF não pôde ser indexado.")
         record.update(
             {
                 "processada_em": _agora(),
                 "status": "processado",
                 "importado": True,
                 "extraido_rel": str(extracted.relative_to(owner)),
-                "indice_rel": str(index.relative_to(owner)),
-                "tabelas": table_records,
-                **processed.metadata,
+                "indice_rel": None,
+                "indice": "fts5",
+                "tabelas": tabelas,
+                "paginas": paginas,
+                "secoes": [],
+                "quantidade_tabelas": len(tabelas),
             }
         )
         _write_registry(owner_id, records)
@@ -407,72 +323,27 @@ def importar_documento(owner_id: str, document_id: str) -> dict:
         raise
 
 
-def _load_index(owner_id: str, record: dict) -> list[dict]:
-    path = _owner_dir(owner_id) / str(record.get("indice_rel") or "")
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
-    return chunks if isinstance(chunks, list) else []
+TERMOS_RESUMO = {"resumo", "resuma", "resumir", "documento", "arquivo", "relatorio", "analise",
+                 "conteudo", "pdf", "principal", "principais", "geral"}
 
 
 def documentos_contexto(owner_id: str, question: str, limite: int = 3) -> list[dict]:
-    """Recupera somente trechos indexados de documentos explicitamente importados."""
-    query = _tokens(question)
-    if not query or limite <= 0:
+    """Trechos dos documentos importados e ativos do usuário, no máximo 5."""
+    termos = busca.termos(question)
+    if not termos or limite <= 0:
         return []
-    candidates = []
-
-    # Detecta se a pergunta é um pedido genérico de resumo / apresentação do documento
-    termos_genericos = {"resumo", "resuma", "documento", "arquivo", "relatorio", "analise", "conteudo", "esse", "este", "sobre"}
-    eh_pedido_resumo = len(query - termos_genericos) == 0
-
-    for record in _read_registry(owner_id):
-        if not record.get("ativo", True) or not record.get("importado"):
-            continue
-        chunks = _load_index(owner_id, record)
-        for i, chunk in enumerate(chunks):
-            content = str(chunk.get("conteudo", "")) if isinstance(chunk, dict) else str(chunk)
-            words = _tokens(content)
-            matched = query & words
-            if matched:
-                score = len(matched) / max(1, len(query))
-                candidates.append(
-                    {
-                        "tipo": "documento",
-                        "fonte": record["nome"],
-                        "trecho": f"página {chunk.get('pagina')}" if isinstance(chunk, dict) and chunk.get("pagina") else f"trecho {i+1}",
-                        "conteudo": content,
-                        "pontuacao": round(score, 4),
-                        "secao": chunk.get("secao") if isinstance(chunk, dict) else None,
-                    }
-                )
-            elif eh_pedido_resumo and i < limite:
-                # Em pedidos de resumo geral, prioriza os chunks iniciais (capa, sumário executivo, introdução)
-                candidates.append(
-                    {
-                        "tipo": "documento",
-                        "fonte": record["nome"],
-                        "trecho": f"página {chunk.get('pagina')}" if isinstance(chunk, dict) and chunk.get("pagina") else f"trecho {i+1}",
-                        "conteudo": content,
-                        "pontuacao": round(0.5 - (i * 0.05), 4),
-                        "secao": chunk.get("secao") if isinstance(chunk, dict) else None,
-                    }
-                )
-
-    candidates.sort(key=lambda item: (-item["pontuacao"], item["fonte"], item["trecho"]))
-    selected = []
-    seen = set()
-    for item in candidates:
-        key = (item["fonte"], item["conteudo"])
-        if key in seen:
-            continue
-        seen.add(key)
-        selected.append(item)
-        if len(selected) >= limite:
-            break
-    return selected
+    ativos = _ativos_importados(owner_id)
+    if not ativos:
+        return []
+    sincronizar_documentos(owner_id)
+    chaves = [r["id"] for r in ativos]
+    if set(termos) <= TERMOS_RESUMO:
+        # Pedido genérico ("resuma o documento"): capa, sumário e introdução.
+        resultados = busca.primeiros(COLECAO_DOCUMENTOS, owner_id, chaves, limite)
+    else:
+        resultados = busca.buscar(question, COLECAO_DOCUMENTOS, owner_id, chaves, limite,
+                                  cobertura_minima=0.5, max_por_fonte=2)
+    return [{**r.como_dict(), "tipo": "documento"} for r in resultados]
 
 
 def exportar_tabela_csv(owner_id: str, document_id: str, table_number: int) -> tuple[bytes, str]:
