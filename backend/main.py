@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from dotenv import load_dotenv
 
 from auth import usuario_atual
-from context import montar_contexto, NUM_CTX, RESPONSE_TOKENS, INPUT_BUDGET
+from context import montar_contexto, NUM_CTX, REFERENCIAS_MARCADOR, RESPONSE_TOKENS, INPUT_BUDGET
 from document_processing import (
     DocumentProcessingError,
     documentos_contexto,
@@ -202,8 +202,7 @@ def conversar(entrada: EntradaChat,usuario: str=Depends(usuario_atual)):
                 sources=[]
             else:
                 # Perguntas atuais usam somente evidências recentes da web. Documentos
-                # locais e respostas anteriores podem estar desatualizados ou contaminar
-                # uma resposta baseada em notícia.
+                # locais ficam de fora; do histórico entram só os últimos turnos.
                 docs=web_docs
                 messages,sources,usage=montar_contexto(entrada.mensagem,rows,docs,
                                                        pesquisa_atual=True,incluir_diagnostico=True,
@@ -232,7 +231,7 @@ def conversar(entrada: EntradaChat,usuario: str=Depends(usuario_atual)):
             referencias='\n'.join('- ['+fonte['titulo']+']('+fonte['url']+')'+
                                    (f" (publicado em {fonte['data_publicacao']})" if fonte.get('data_publicacao') else '')
                                    for fonte in usados)
-            text=text.rstrip()+'\n\nFontes consultadas:\n'+referencias
+            text=text.rstrip()+REFERENCIAS_MARCADOR+referencias
     except Exception as exc:
         logger.warning('Geração falhou: tipo=%s requisicao=%s',type(exc).__name__,rid)
         timeout=isinstance(exc,httpx.TimeoutException)

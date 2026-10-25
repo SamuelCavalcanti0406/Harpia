@@ -340,5 +340,33 @@ class WebSearchFreshnessTests(unittest.TestCase):
         self.assertNotIn('time_range',captured)
         self.assertIn('Matéria antiga',[source['titulo'] for source in sources])
 
+class PromptNaturalnessTests(unittest.TestCase):
+    def test_system_prompt_carries_identity_and_today(self):
+        messages,_=context.montar_contexto('Quem é você?',[],[])
+        system=messages[0]['content']
+        self.assertIn('HarpIA',system);self.assertIn('Samuel Coronel',system)
+        self.assertIn(context.data_extenso(),system)
+        self.assertEqual(context.data_extenso(context.date(2026,3,5)),'5 de março de 2026')
+
+    def test_sources_are_sent_as_plain_text_not_json(self):
+        docs=[{'tipo':'web','titulo':'Selic mantida','url':'https://www.exemplo.com.br/selic',
+               'conteudo':'O Copom manteve a taxa.','data_publicacao':'2026-10-24'}]
+        messages,sources=context.montar_contexto('Como está a Selic hoje?',[],docs,pesquisa_atual=True)
+        evidence=messages[-2]['content']
+        self.assertIn('[Fonte 1 — Selic mantida (exemplo.com.br), publicado em 2026-10-24]',evidence)
+        self.assertIn('O Copom manteve a taxa.',evidence)
+        self.assertNotIn('{"',evidence)
+
+    def test_web_search_keeps_only_recent_turns_without_reference_links(self):
+        rows=[]
+        for index in range(5):
+            rows.extend([{'papel':'user','conteudo':f'pergunta {index}'},
+                         {'papel':'assistant','conteudo':f'resposta {index}'+context.REFERENCIAS_MARCADOR+'- [x](https://x.com)'}])
+        docs=[{'tipo':'web','titulo':'T','url':'https://x.com','conteudo':'fato atual'}]
+        messages,_=context.montar_contexto('e hoje?',rows,docs,pesquisa_atual=True)
+        contents=[m['content'] for m in messages]
+        self.assertEqual([c for c in contents if c.startswith(('pergunta','resposta'))],
+                         ['pergunta 3','resposta 3','pergunta 4','resposta 4'])
+
 if __name__=='__main__':unittest.main()
 
