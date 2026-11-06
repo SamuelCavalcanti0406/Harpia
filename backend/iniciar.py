@@ -21,6 +21,8 @@ import uvicorn
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / 'backend'
 LOCAL = ROOT / '.local'
+# Em CPU, a detecção de GPU do Ollama pode levar ~1 min na primeira partida.
+PARTIDA_SEGUNDOS = int(os.environ.get('HARPIA_OLLAMA_PARTIDA_SEGUNDOS', '150'))
 
 
 def proteger(data: bytes, decrypt=False) -> bytes:
@@ -130,6 +132,8 @@ def preparar_ollama():
     url = url_ollama()
     env = os.environ.copy()
     env['OLLAMA_HOST'] = url
+    # Desliga os modelos em nuvem do Ollama: tudo roda neste computador.
+    env['OLLAMA_NO_CLOUD'] = '1'
     LOCAL.mkdir(exist_ok=True)
     timeout = httpx.Timeout(connect=3, read=10, write=10, pool=3)
     with httpx.Client(timeout=timeout, trust_env=False) as client:
@@ -141,12 +145,12 @@ def preparar_ollama():
                 process = subprocess.Popen([executable, 'serve'], env=env, stdout=log,
                                            stderr=subprocess.STDOUT,
                                            creationflags=subprocess.CREATE_NO_WINDOW)
-            deadline = time.monotonic() + 45
+            deadline = time.monotonic() + PARTIDA_SEGUNDOS
             while True:
                 try:
                     names = modelos(client, url)
                     break
-                except (httpx.ConnectError, httpx.TimeoutException):
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError):
                     if process.poll() is not None or time.monotonic() >= deadline:
                         raise RuntimeError('Ollama nao iniciou. Consulte .local/ollama.log.')
                     time.sleep(0.5)
@@ -155,14 +159,14 @@ def preparar_ollama():
             # Give an already-running instance time to answer instead of spawning
             # a second server or failing on the first slow /api/tags response.
             print('O Ollama esta demorando para responder; aguardando...')
-            deadline = time.monotonic() + 45
+            deadline = time.monotonic() + PARTIDA_SEGUNDOS
             while True:
                 try:
                     names = modelos(client, url)
                     break
-                except (httpx.ConnectError, httpx.TimeoutException):
+                except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError):
                     if time.monotonic() >= deadline:
-                        raise RuntimeError('O Ollama nao respondeu em 45 segundos. Verifique se o Ollama esta aberto e tente novamente.')
+                        raise RuntimeError('O Ollama nao respondeu em ' + str(PARTIDA_SEGUNDOS) + ' segundos. Verifique se o Ollama esta aberto e tente novamente.')
                     time.sleep(0.5)
         model = os.getenv('HARPIA_MODEL', 'harpia')
         exists = model in names or model + ':latest' in names

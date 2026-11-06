@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from dotenv import load_dotenv
 
 from auth import usuario_atual
-from context import (INPUT_BUDGET, MAX_DOCUMENTS, NUM_CTX, REFERENCIAS_MARCADOR, RESPONSE_TOKENS,
+from context import (INPUT_BUDGET, LIMITE_OFFLINE, MAX_DOCUMENTS, NUM_CTX, REFERENCIAS_MARCADOR, RESPONSE_TOKENS,
                      formatar_referencias, montar_contexto)
 from document_processing import (
     DocumentProcessingError,
@@ -40,8 +40,7 @@ FIRST_TOKEN_SECONDS=float(os.getenv('HARPIA_FIRST_TOKEN_SECONDS','180'))
 GENERATION_SECONDS=float(os.getenv('HARPIA_GENERATION_SECONDS','480'))
 LEASE_SECONDS=GENERATION_SECONDS+60
 KEEP_ALIVE=os.getenv('HARPIA_KEEP_ALIVE','30m')
-AVISO_OFFLINE=('Funciono offline, sem acesso à internet, e não encontrei nos meus arquivos locais nada sobre isso. '
-               'Por isso não consigo confirmar notícias, cotações ou acontecimentos recentes. '
+AVISO_OFFLINE=(LIMITE_OFFLINE+' Também não encontrei nada sobre isso nos meus arquivos locais. '
                'Se você tiver um documento sobre o assunto, importe-o com /importar e pergunte de novo; '
                'se quiser, também posso explicar o tema de forma geral.')
 

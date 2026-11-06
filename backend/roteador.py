@@ -45,6 +45,8 @@ _INICIO_CORTESIA = re.compile(r'^(obrigad[oa]|valeu|vlw|brigad[oa]|tchau|ate (lo
 _ATUALIDADE = re.compile('|'.join((
     r'\bnoticias?\b', r'\bultimas\b', r'\bhoje\b', r'\bontem\b', r'\besta semana\b', r'\beste mes\b',
     r'\bcotacao\b', r'\b(dolar|euro|bitcoin) (hoje|agora)\b', r'\bpreco atual\b', r'\bprevisao do tempo\b',
+    r'\bvai (chover|fazer (sol|frio|calor))\b', r'\b(chuva|clima|temperatura|tempo) (hoje|amanha|agora)\b',
+    r'\b(bolsa|ibovespa) (hoje|agora)\b',
     r'\bquem ganhou\b', r'\bplacar\b', r'\bresultado do jogo\b', r'\bpresidente atual\b',
     r'\b(acabou|acaba) de (acontecer|sair)\b', r'\bem tempo real\b',
 )))
